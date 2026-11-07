@@ -76,6 +76,46 @@ A geometric cube in empty space has $48$ symmetries ($24$ rotations $\times 2$ r
   - $\times 2$ reflections across the $Y$-axis ($x \leftrightarrow 3-x$)
 - Every single state $(s, \boldsymbol{\pi}, z)$ collected during self-play yields **8 mathematically exact training samples** for free, multiplying sample efficiency by $8\times$.
 
+### 2.5 Layer-by-Layer Structure of `TTT3DNet` & Rationale
+
+For a batch of $B$ board positions (with default `channels = 64`, `num_blocks = 3`), `TTT3DNet` transforms the $(B, 3, 4, 4, 4)$ input through the following topology:
+
+```mermaid
+flowchart TD
+    In["Input Canonical Tensor<br/>Shape: (B, 3, 4, 4, 4)"]
+    Stem["1. 3D Stem Block<br/>Conv3d(3 → 64, k=3×3×3, pad=1)<br/>BatchNorm3d(64) + ReLU<br/>Shape: (B, 64, 4, 4, 4)"]
+    Res1["2. ResBlock3D #1<br/>2 × [Conv3d(64 → 64, k=3×3×3, pad=1) + BN3d] + Skip<br/>Shape: (B, 64, 4, 4, 4)"]
+    Res2["3. ResBlock3D #2<br/>2 × [Conv3d(64 → 64, k=3×3×3, pad=1) + BN3d] + Skip<br/>Shape: (B, 64, 4, 4, 4)"]
+    Res3["4. ResBlock3D #3<br/>2 × [Conv3d(64 → 64, k=3×3×3, pad=1) + BN3d] + Skip<br/>Shape: (B, 64, 4, 4, 4)"]
+
+    PConv["5a. Policy Bottleneck<br/>Conv3d(64 → 16, k=1×1×1) + BN3d + ReLU<br/>Shape: (B, 16, 4, 4, 4) → Flatten (B, 1024)"]
+    PFC["Policy Linear Layer<br/>Linear(1024 → 16) + Illegal Mask (-1e9)<br/>Output π: (B, 16) Action Logits / Softmax"]
+
+    VConv["5b. Value Bottleneck<br/>Conv3d(64 → 8, k=1×1×1) + BN3d + ReLU<br/>Shape: (B, 8, 4, 4, 4) → Flatten (B, 512)"]
+    VFC["Value MLP<br/>Linear(512 → 64) + ReLU → Linear(64 → 1) + Tanh<br/>Output v: (B, 1) Scalar in [-1, +1]"]
+
+    In --> Stem --> Res1 --> Res2 --> Res3
+    Res3 --> PConv --> PFC
+    Res3 --> VConv --> VFC
+```
+
+| Stage | Layer / Operation | Output Tensor Shape | Why It Exists |
+| :--- | :--- | :--- | :--- |
+| **0. Input** | Canonical 3D Board Tensor | `(B, 3, 4, 4, 4)` | Encodes **(Ch 0)** My balls, **(Ch 1)** Opponent balls, **(Ch 2)** Gravity landing cells $(x,y,z)$. |
+| **1. Stem** | `Conv3d(3, 64, k=3, pad=1)` + `BN3d` + `ReLU` | `(B, 64, 4, 4, 4)` | Lifts the 3 raw binary channels into 64 learned volumetric feature maps while keeping the $4 \times 4 \times 4$ cube dimensions intact (`padding=1`). |
+| **2. Trunk** | $3 \times$ `ResBlock3D(64)` (6 `Conv3d` layers total) | `(B, 64, 4, 4, 4)` | Extracts local 3D line threats ($2$-in-a-row, $3$-in-a-row) and composes them into global multi-line forks across the entire $4 \times 4 \times 4$ cube. |
+| **3a. Policy Head ($\pi$)** | `Conv3d(64, 16, k=1)` $\to$ `BN` $\to$ `ReLU` $\to$ `Flatten` $\to$ `Linear(1024, 16)` + Legal Mask | `(B, 16)` | Projects 3D features down to 16 channels per voxel ($16 \times 64 = 1024$), then maps to the 16 $(x, y)$ drop columns, masking full columns with $-10^9$. |
+| **3b. Value Head ($v$)** | `Conv3d(64, 8, k=1)` $\to$ `BN` $\to$ `ReLU` $\to$ `Flatten` $\to$ `Linear(512, 64)` $\to$ `ReLU` $\to$ `Linear(64, 1)` $\to$ `Tanh` | `(B, 1)` | Compresses spatial features to 8 channels per voxel ($8 \times 64 = 512$), aggregates into a 64-unit hidden layer, and outputs a bounded win/draw/loss score in $[-1, +1]$. |
+
+#### Key Design Decisions Behind Each Stage:
+1. **3-Channel Canonical Input with Gravity Surface (Channel 2):**
+   - **Perspective Invariance:** Channel 0 is always the player to move and Channel 1 is always the opponent, cutting the effective state space in half.
+   - **Explicit Gravity Landing Mask:** Marking the 16 exact landing cells $(x, y, z_{\text{land}})$ with $1.0$ in Channel 2 spares early convolutional layers from having to "count" column heights, allowing the very first $3 \times 3 \times 3$ kernel to immediately detect whether a legal move completes a 4-in-a-row.
+2. **Zero Spatial Pooling (`padding=1, stride=1` Everywhere):**
+   - Unlike image classifiers that use `MaxPool` for translation invariance, board games require exact coordinate precision—shifting a stone by 1 cell turns a winning line into a miss. Keeping the tensor at $(4, 4, 4)$ through every residual block preserves exact 3D voxel alignment.
+3. **$1 \times 1 \times 1$ Pointwise Bottleneck Convolutions in Both Heads:**
+   - Directly flattening $(B, 64, 4, 4, 4) \to 4096$ into a dense layer would over-parameterize the head and encourage overfitting. Using `Conv3d(..., kernel_size=1)` bottlenecks (`64 -> 16` for Policy, `64 -> 8` for Value) acts as a per-voxel feature selector before the final `Linear` projection.
+
 ---
 
 ## 3. Detailed Architecture
