@@ -13,6 +13,7 @@ from ttt3d.network import TTT3DNet
 from ttt3d.trainer import (
     ReplayBuffer,
     evaluate_against_baseline,
+    generate_adversarial_sparring,
     generate_self_play_episodes,
     generate_tactical_threat_curriculum,
     generate_vectorized_rollouts,
@@ -43,7 +44,10 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt_path = Path(args.checkpoint)
     if ckpt_path.exists():
-        model = TTT3DNet.load_checkpoint(ckpt_path).to(device)
+        try:
+            model = TTT3DNet.load_checkpoint(ckpt_path).to(device)
+        except RuntimeError:
+            model = TTT3DNet(channels=args.channels, num_blocks=args.blocks).to(device)
     else:
         model = TTT3DNet(channels=args.channels, num_blocks=args.blocks).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -51,13 +55,20 @@ def main() -> None:
 
     with VectorizedEnvClient(args.grpc_target) as client:
         for it in range(1, args.iterations + 1):
-            generate_tactical_threat_curriculum(buffer=buffer, num_games=60, augment=True)
+            generate_tactical_threat_curriculum(buffer=buffer, num_games=80, augment=True)
+            generate_adversarial_sparring(
+                client=client,
+                model=model,
+                buffer=buffer,
+                num_games_per_opponent=4,
+                augment=True,
+            )
             generate_self_play_episodes(
                 client=client,
                 model=model,
                 buffer=buffer,
                 num_episodes=args.episodes_per_iter,
-                temperature=0.8 if it <= args.iterations // 2 else 0.5,
+                temperature=0.8 if it <= args.iterations // 2 else 0.4,
                 mcts_simulations=args.mcts_sims,
                 use_go_mcts_teacher=True,
                 augment=True,
@@ -68,7 +79,7 @@ def main() -> None:
                 buffer=buffer,
                 num_envs=8,
                 num_steps=20,
-                temperature=0.6,
+                temperature=0.5,
                 augment=True,
             )
             train_stats = train_epoch(
@@ -83,6 +94,9 @@ def main() -> None:
             eval_pure_rnd = evaluate_against_baseline(
                 client, model, opponent="random", num_games=20, use_tactical_lookahead=False
             )
+            eval_pure_heur = evaluate_against_baseline(
+                client, model, opponent="heuristic", num_games=10, use_tactical_lookahead=False
+            )
             eval_hybrid_heur = evaluate_against_baseline(
                 client, model, opponent="heuristic", num_games=10, use_tactical_lookahead=True
             )
@@ -92,6 +106,7 @@ def main() -> None:
                 f"loss={train_stats['total_loss']:.4f} "
                 f"(pi={train_stats['policy_loss']:.4f}, v={train_stats['value_loss']:.4f}) "
                 f"pure_vs_random={eval_pure_rnd['win_rate']*100:.1f}% "
+                f"pure_vs_heuristic={eval_pure_heur['win_rate']*100:.1f}% "
                 f"hybrid_vs_heuristic={eval_hybrid_heur['win_rate']*100:.1f}%"
             )
             model.save_checkpoint(ckpt_path)

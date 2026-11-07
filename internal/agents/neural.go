@@ -5,17 +5,21 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"sync"
 
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
 )
 
+const stemChannels = 11
+
 //go:embed weights/ttt3d_latest.bin
 var embeddedTTT3DWeights []byte
 
 type resBlockWeights struct {
-	w1, b1 []float32
-	w2, b2 []float32
+	w1, b1           []float32
+	wGlobal, bGlobal []float32
+	w2, b2           []float32
 }
 
 // TTT3DModel holds the BatchNorm-fused 3D ResNet weights exported from PyTorch `TTT3DNet`.
@@ -87,7 +91,7 @@ func ParseFusedWeights(data []byte) (*TTT3DModel, error) {
 		blocks:    make([]resBlockWeights, numBlocks),
 	}
 	var err error
-	if m.stemW, err = readFloats(c * 3 * 27); err != nil {
+	if m.stemW, err = readFloats(c * stemChannels * 27); err != nil {
 		return nil, err
 	}
 	if m.stemB, err = readFloats(c); err != nil {
@@ -98,6 +102,12 @@ func ParseFusedWeights(data []byte) (*TTT3DModel, error) {
 			return nil, err
 		}
 		if m.blocks[b].b1, err = readFloats(c); err != nil {
+			return nil, err
+		}
+		if m.blocks[b].wGlobal, err = readFloats(c * c * 64); err != nil {
+			return nil, err
+		}
+		if m.blocks[b].bGlobal, err = readFloats(c); err != nil {
 			return nil, err
 		}
 		if m.blocks[b].w2, err = readFloats(c * c * 27); err != nil {
@@ -221,14 +231,126 @@ func linearLayer(in []float32, inDim, outDim int, w, b []float32) []float32 {
 	return out
 }
 
+func extractGeometricFeatures(input [engine.CanonicalTensorSize]float32) [stemChannels * 64]float32 {
+	var out [stemChannels * 64]float32
+	copy(out[:engine.CanonicalTensorSize], input[:])
+
+	var myMask, oppMask, surfMask uint64
+	for bit := uint8(0); bit < 64; bit++ {
+		if input[bit] > 0.5 {
+			myMask |= uint64(1) << bit
+		}
+		if input[64+int(bit)] > 0.5 {
+			oppMask |= uint64(1) << bit
+		}
+		if input[128+int(bit)] > 0.5 {
+			surfMask |= uint64(1) << bit
+		}
+	}
+	occMask := myMask | oppMask
+
+	var cellMy3, cellOpp3, cellMy2, cellOpp2 [64]float32
+	for _, mask := range engine.WinMasks {
+		myBits := myMask & mask
+		oppBits := oppMask & mask
+		emptyOnLine := mask &^ occMask
+
+		if oppBits == 0 {
+			switch bits.OnesCount64(myBits) {
+			case 3:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellMy3[b] += 1.0
+				}
+			case 2:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellMy2[b] += 1.0
+				}
+			}
+		}
+		if myBits == 0 {
+			switch bits.OnesCount64(oppBits) {
+			case 3:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellOpp3[b] += 1.0
+				}
+			case 2:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellOpp2[b] += 1.0
+				}
+			}
+		}
+	}
+
+	for b := 0; b < 64; b++ {
+		isSurf := (surfMask & (uint64(1) << b)) != 0
+		if isSurf && cellMy3[b] > 0.5 {
+			out[3*64+b] = 1.0
+		}
+		if isSurf && cellOpp3[b] > 0.5 {
+			out[4*64+b] = 1.0
+		}
+		if b < 48 && isSurf && cellOpp3[b+16] > 0.5 {
+			out[5*64+b] = 1.0
+		}
+		if b < 48 && isSurf && cellMy3[b+16] > 0.5 {
+			out[6*64+b] = 1.0
+		}
+		m3 := cellMy3[b]
+		if m3 > 2.0 {
+			m3 = 2.0
+		}
+		out[7*64+b] = m3 * 0.5
+
+		o3 := cellOpp3[b]
+		if o3 > 2.0 {
+			o3 = 2.0
+		}
+		out[8*64+b] = o3 * 0.5
+
+		m2 := cellMy2[b]
+		if m2 > 4.0 {
+			m2 = 4.0
+		}
+		out[9*64+b] = m2 * 0.25
+
+		o2 := cellOpp2[b]
+		if o2 > 4.0 {
+			o2 = 4.0
+		}
+		out[10*64+b] = o2 * 0.25
+	}
+	return out
+}
+
+func addConv3d4x4GlobalInPlace(dst []float32, in []float32, c int, wGlobal, bGlobal []float32) {
+	inLen := c * 64
+	for oc := 0; oc < c; oc++ {
+		sum := bGlobal[oc]
+		wBase := oc * inLen
+		for i := 0; i < inLen; i++ {
+			sum += in[i] * wGlobal[wBase+i]
+		}
+		ocBase := oc * 64
+		for cell := 0; cell < 64; cell++ {
+			dst[ocBase+cell] += sum
+		}
+	}
+}
+
 // Forward executes the exact 3D ResNet forward pass on a 192-element canonical float32 tensor.
 func (m *TTT3DModel) Forward(input [engine.CanonicalTensorSize]float32) (logits [16]float32, value float32) {
 	c := m.Channels
-	h := conv3d3x3Pad1(input[:], 3, c, m.stemW, m.stemB)
+	stemIn := extractGeometricFeatures(input)
+	h := conv3d3x3Pad1(stemIn[:], stemChannels, c, m.stemW, m.stemB)
 	reluInPlace(h)
 
 	for _, blk := range m.blocks {
 		out1 := conv3d3x3Pad1(h, c, c, blk.w1, blk.b1)
+		addConv3d4x4GlobalInPlace(out1, h, c, blk.wGlobal, blk.bGlobal)
 		reluInPlace(out1)
 		out2 := conv3d3x3Pad1(out1, c, c, blk.w2, blk.b2)
 		for i := range out2 {
@@ -314,6 +436,24 @@ func (a *TTT3DNetAgent) Name() string {
 	return "ttt3dnet-pure"
 }
 
+func hasUnstoppableThreat(g *engine.Game, attacker engine.Player) bool {
+	threats := FindImmediateWinningActions(g, attacker)
+	if len(threats) == 0 {
+		return false
+	}
+	if len(threats) >= 2 {
+		return true
+	}
+	afterBlock := g.Clone()
+	if _, err := afterBlock.ApplyMove(threats[0]); err != nil {
+		return false
+	}
+	if afterBlock.Status != engine.StatusOngoing {
+		return false
+	}
+	return len(FindImmediateWinningActions(afterBlock, attacker)) > 0
+}
+
 // SelectActionWithPolicy returns the chosen action, 16-element policy distribution, and state value.
 func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float32, float32, error) {
 	valid := ValidActions(g)
@@ -375,16 +515,16 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 		candidates = valid
 	}
 
-	// 4. Check for offensive double-threat forks (2+ immediate winning moves next turn)
+	// 4. Check for offensive double-threat or stacked forks
 	for _, act := range candidates {
 		clone := g.Clone()
 		_, _ = clone.ApplyMove(act)
-		if len(FindImmediateWinningActions(clone, me)) >= 2 {
+		if hasUnstoppableThreat(clone, me) {
 			return act, probs, val, nil
 		}
 	}
 
-	// 5. Filter out moves allowing the opponent to play a reply creating a double-threat fork
+	// 5. Filter out moves allowing the opponent to play a reply creating a double-threat or stacked fork
 	nonForkVulnerable := make([]uint8, 0, len(candidates))
 	for _, act := range candidates {
 		clone := g.Clone()
@@ -402,7 +542,7 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 				oppCanFork = true
 				break
 			}
-			if len(FindImmediateWinningActions(afterReply, opp)) >= 2 && len(FindImmediateWinningActions(afterReply, me)) == 0 {
+			if hasUnstoppableThreat(afterReply, opp) && len(FindImmediateWinningActions(afterReply, me)) == 0 {
 				oppCanFork = true
 				break
 			}

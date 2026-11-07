@@ -24,6 +24,7 @@ from ttt3d.symmetry import (
 from ttt3d.trainer import (
     ReplayBuffer,
     evaluate_against_baseline,
+    generate_adversarial_sparring,
     generate_self_play_episodes,
     generate_vectorized_rollouts,
     train_epoch,
@@ -267,6 +268,17 @@ def test_end_to_end_self_play_vectorized_pool_and_training(
     )
     assert stats_nn["episodes"] == 1
     assert stats_nn["samples_added"] > 0
+
+    # 2b. Generate adversarial sparring games against heuristic and alphabeta
+    spar_added = generate_adversarial_sparring(
+        client=grpc_client,
+        model=net,
+        buffer=buffer,
+        num_games_per_opponent=2,
+        augment=True,
+        rng=rng,
+    )
+    assert spar_added > 0
 
     # 3. Generate vectorized rollouts across parallel Go bitboard environments
     vec_stats = generate_vectorized_rollouts(

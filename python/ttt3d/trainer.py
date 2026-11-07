@@ -16,6 +16,7 @@ from .arena_bot import (
     _build_canonical_from_bitboards,
     check_bitboard_win,
     find_immediate_wins,
+    has_unstoppable_threat,
     landing_bit_for_action,
 )
 from .grpc_client import VectorizedEnvClient
@@ -178,16 +179,18 @@ class ReplayBuffer:
         valid_mask: int = 0xFFFF,
         augment: bool = True,
         rectify_tactical: bool = True,
+        extra_blunder_mask: int = 0,
     ) -> int:
         """Adds a sample (or all 8 D4 symmetric transforms if augment=True) to the buffer."""
         s_arr = np.ascontiguousarray(state, dtype=np.float32)
         p_arr = np.ascontiguousarray(policy, dtype=np.float32)
         val = float(value)
         mask = int(valid_mask) & 0xFFFF
-        blunder_mask = 0
+        blunder_mask = int(extra_blunder_mask) & mask
 
         if rectify_tactical:
-            p_arr, val, blunder_mask = rectify_tactical_sample(s_arr, p_arr, val, mask)
+            p_arr, val, tac_blunder = rectify_tactical_sample(s_arr, p_arr, val, mask)
+            blunder_mask |= tac_blunder
 
         if not augment:
             self._buffer.append(TrainingSample(s_arr, p_arr, val, mask, blunder_mask))
@@ -283,10 +286,15 @@ def compute_policy_value_loss(
             unlikelihood = -torch.log((1.0 - blunder_prob_mass).clamp(min=1e-6))
 
             # 2. Symmetric logit margin penalty: pull target safe logit UP and push 1-ply blunder logits DOWN
+            # Combines mean blunder violation with worst-case (max) blunder logit violation so argmax is safe
             target_safe_logit = (logits * target_policies).sum(dim=-1, keepdim=True)
             margin_violation = F.relu(logits - target_safe_logit + 2.5) * blunder_bool.float()
             blunder_count = blunder_bool.float().sum(dim=-1).clamp(min=1.0)
-            margin_loss = (margin_violation.pow(2).sum(dim=-1)) / blunder_count
+            mean_margin_loss = (margin_violation.pow(2).sum(dim=-1)) / blunder_count
+
+            max_blunder_logit = logits.masked_fill(~blunder_bool, -1e9).max(dim=-1).values
+            max_margin_loss = F.relu(max_blunder_logit - target_safe_logit.squeeze(-1) + 3.0).pow(2)
+            margin_loss = 0.5 * mean_margin_loss + 0.5 * max_margin_loss
 
             tactical_mask_f = has_tactical.float()
             blunder_loss = (
@@ -428,16 +436,27 @@ def generate_self_play_episodes(
             else:
                 outcome_z = -1.0
 
+            my_bb, opp_bb = _canonical_tensor_to_bitboards(obs)
+            teacher_pi, teacher_val = _compute_tactical_teacher_policy(my_bb, opp_bb, mask_at_step)
+            blended_pi = 0.5 * target_pi + 0.5 * teacher_pi if use_go_mcts_teacher else teacher_pi
+            pi_sum = float(blended_pi.sum())
+            if pi_sum > 1e-8:
+                blended_pi = blended_pi / pi_sum
+
             _, step_blunder_mask, _ = compute_tactical_action_masks(obs, mask_at_step)
             if (step_blunder_mask & (1 << act_taken)) != 0:
                 # Direct 1-ply blunder penalty if the executed move missed an immediate threat
                 blended_value = -1.0
             else:
-                blended_value = 0.5 * outcome_z + 0.5 * search_val if use_go_mcts_teacher else outcome_z
+                blended_value = (
+                    0.4 * outcome_z + 0.3 * search_val + 0.3 * teacher_val
+                    if use_go_mcts_teacher
+                    else 0.5 * outcome_z + 0.5 * teacher_val
+                )
 
             samples_added += buffer.add_sample(
                 state=obs,
-                policy=target_pi,
+                policy=blended_pi,
                 value=blended_value,
                 valid_mask=mask_at_step,
                 augment=augment,
@@ -452,16 +471,368 @@ def generate_self_play_episodes(
     }
 
 
+_CELL_LINE_COUNTS: Tuple[int, ...] = tuple(
+    sum(1 for m in WIN_LINE_MASKS if (m & (1 << b)) != 0) for b in range(64)
+)
+
+
+def _evaluate_bitboard_heuristic(my_bb: int, opp_bb: int) -> int:
+    """Computes the 76-line positional score from `my_bb`'s perspective (mirrors Go EvaluateBoard)."""
+    occ = my_bb | opp_bb
+    surface = 0
+    for a in range(NUM_ACTIONS):
+        lbit = landing_bit_for_action(occ, a)
+        if lbit is not None:
+            surface |= 1 << lbit
+
+    score = 0
+    for mask in WIN_LINE_MASKS:
+        my_bits = my_bb & mask
+        opp_bits = opp_bb & mask
+        if my_bits != 0 and opp_bits != 0:
+            continue
+        if my_bits != 0:
+            cnt = my_bits.bit_count()
+            if cnt == 1:
+                score += 1
+            elif cnt == 2:
+                score += 6
+            elif cnt == 3:
+                missing = mask & (~my_bits)
+                score += 65 if (missing & surface) != 0 else 25
+        elif opp_bits != 0:
+            cnt = opp_bits.bit_count()
+            if cnt == 1:
+                score -= 1
+            elif cnt == 2:
+                score -= 6
+            elif cnt == 3:
+                missing = mask & (~opp_bits)
+                score -= 80 if (missing & surface) != 0 else 28
+    return score
+
+
+def _compute_tactical_teacher_policy(
+    my_bb: int, opp_bb: int, valid_mask: int
+) -> Tuple[np.ndarray, float]:
+    """Computes a sharp tactical + 2-ply fork + 76-line positional policy and value target."""
+    pi = np.zeros(NUM_ACTIONS, dtype=np.float32)
+    valid_mask = int(valid_mask) & 0xFFFF
+    if valid_mask == 0:
+        return pi, 0.0
+
+    occ = my_bb | opp_bb
+    legal = [a for a in range(NUM_ACTIONS) if (valid_mask & (1 << a)) != 0]
+
+    # 1. Immediate 1-ply win
+    my_wins = find_immediate_wins(my_bb, occ)
+    if my_wins:
+        for a in my_wins:
+            pi[a] = 1.0 / len(my_wins)
+        return pi, 1.0
+
+    # 2. Forced 1-ply block of opponent's 4th-ball threat
+    opp_wins = find_immediate_wins(opp_bb, occ)
+    if opp_wins:
+        safe_blocks = [
+            a
+            for a in opp_wins
+            if not find_immediate_wins(opp_bb, occ | (1 << (landing_bit_for_action(occ, a) or 0)))
+        ]
+        blocks = safe_blocks if safe_blocks else opp_wins
+        for a in blocks:
+            pi[a] = 1.0 / len(blocks)
+        val = 0.0 if (len(opp_wins) == 1 and len(safe_blocks) > 0) else -1.0
+        return pi, val
+
+    # 3. Filter out 1-ply poison moves
+    safe_moves: List[int] = []
+    for a in legal:
+        lbit = landing_bit_for_action(occ, a)
+        if lbit is not None and not find_immediate_wins(opp_bb, occ | (1 << lbit)):
+            safe_moves.append(a)
+    if not safe_moves:
+        for a in legal:
+            pi[a] = 1.0 / len(legal)
+        return pi, -1.0
+
+    # 4. Offensive 2-way or stacked fork
+    fork_moves: List[int] = []
+    for a in safe_moves:
+        lbit = landing_bit_for_action(occ, a)
+        if lbit is not None and has_unstoppable_threat(my_bb | (1 << lbit), opp_bb, occ | (1 << lbit)):
+            fork_moves.append(a)
+    if fork_moves:
+        for a in fork_moves:
+            pi[a] = 1.0 / len(fork_moves)
+        return pi, 1.0
+
+    # 5. Defensive fork prevention (avoid letting opponent reply with a win or 2-way/stacked fork)
+    non_fork_vulnerable: List[int] = []
+    for a in safe_moves:
+        lbit = landing_bit_for_action(occ, a)
+        if lbit is None:
+            continue
+        next_my = my_bb | (1 << lbit)
+        next_occ = occ | (1 << lbit)
+        my_threats = find_immediate_wins(next_my, next_occ)
+        opp_replies = my_threats if my_threats else [
+            r for r in range(NUM_ACTIONS) if landing_bit_for_action(next_occ, r) is not None
+        ]
+        opp_can_fork = False
+        for r in opp_replies:
+            r_bit = landing_bit_for_action(next_occ, r)
+            if r_bit is None:
+                continue
+            opp_after = opp_bb | (1 << r_bit)
+            occ_after = next_occ | (1 << r_bit)
+            if check_bitboard_win(opp_after):
+                opp_can_fork = True
+                break
+            if has_unstoppable_threat(opp_after, next_my, occ_after) and not find_immediate_wins(next_my, occ_after):
+                opp_can_fork = True
+                break
+        if not opp_can_fork:
+            non_fork_vulnerable.append(a)
+
+    candidates = non_fork_vulnerable if non_fork_vulnerable else safe_moves
+
+    # 6. Rank candidates by 2-ply minimax over 76-line heuristic + cell connectivity
+    scores = np.empty(len(candidates), dtype=np.float64)
+    for idx, a in enumerate(candidates):
+        lbit = landing_bit_for_action(occ, a)
+        assert lbit is not None
+        next_my = my_bb | (1 << lbit)
+        next_occ = occ | (1 << lbit)
+        my_threats = find_immediate_wins(next_my, next_occ)
+        opp_replies = my_threats if my_threats else [
+            r for r in range(NUM_ACTIONS) if landing_bit_for_action(next_occ, r) is not None
+        ]
+        worst_reply_score = 1e9
+        for r in opp_replies:
+            r_bit = landing_bit_for_action(next_occ, r)
+            if r_bit is None:
+                continue
+            opp_after = opp_bb | (1 << r_bit)
+            if check_bitboard_win(opp_after):
+                reply_s = -10000.0
+            else:
+                reply_s = float(
+                    _evaluate_bitboard_heuristic(next_my, opp_after)
+                    + _CELL_LINE_COUNTS[lbit] * 2
+                    - _CELL_LINE_COUNTS[r_bit] * 2
+                )
+            if reply_s < worst_reply_score:
+                worst_reply_score = reply_s
+        if worst_reply_score > 1e8:
+            worst_reply_score = float(_evaluate_bitboard_heuristic(next_my, opp_bb) + _CELL_LINE_COUNTS[lbit] * 2)
+        scores[idx] = worst_reply_score
+
+    max_s = float(scores.max())
+    weights = np.exp((scores - max_s) / 4.0)
+    weights /= weights.sum()
+    for idx, a in enumerate(candidates):
+        pi[a] = float(weights[idx])
+
+    val_est = float(np.tanh(max_s / 80.0))
+    return pi, val_est
+
+
+def _zero_prob_blunder_mask(policy: np.ndarray, valid_mask: int) -> int:
+    """Returns a 16-bit mask of legal actions that have zero probability in `policy`."""
+    valid_mask = int(valid_mask) & 0xFFFF
+    zero_mask = 0
+    for a in range(NUM_ACTIONS):
+        if (valid_mask & (1 << a)) != 0 and float(policy[a]) <= 1e-6:
+            zero_mask |= 1 << a
+    if zero_mask != 0 and (valid_mask & (~zero_mask)) != 0:
+        return zero_mask
+    return 0
+
+
+def generate_adversarial_sparring(
+    client: VectorizedEnvClient,
+    model: TTT3DNet,
+    buffer: ReplayBuffer,
+    num_games_per_opponent: int = 4,
+    augment: bool = True,
+    rng: Optional[np.random.Generator] = None,
+) -> int:
+    """Runs DAgger sparring games of Pure `model` against `heuristic` and `alphabeta`."""
+    generator = rng if rng is not None else np.random.default_rng()
+    samples_added = 0
+
+    for opp_name in ("heuristic", "alphabeta"):
+        for g_idx in range(num_games_per_opponent):
+            game_id = f"spar_{opp_name}_{g_idx}"
+            nn_player = PLAYER_WHITE if (g_idx % 2 == 0) else PLAYER_BLACK
+            # First two games per opponent use greedy temp=0.0 to hit exact deterministic eval lines
+            temp = 0.0 if g_idx < 2 else 0.25
+            state = client.reset(game_id=game_id)
+            done = False
+            traj: List[Tuple[np.ndarray, int, int, int, int]] = []
+
+            while not done:
+                obs = state["obs"]
+                valid_mask = int(state["valid_moves_mask"])
+                cur_player = int(state["current_player"])
+                ab_res = client.select_action(agent="alphabeta", game_id=game_id)
+                ab_act = int(ab_res["action"])
+
+                if cur_player == nn_player:
+                    act, _, _ = model.select_action(
+                        obs, valid_mask=valid_mask, temperature=temp, rng=generator
+                    )
+                else:
+                    opp_res = client.select_action(agent=opp_name, game_id=game_id)
+                    act = int(opp_res["action"])
+
+                traj.append((obs, cur_player, valid_mask, int(act), ab_act))
+                step_res = client.step(action=int(act), game_id=game_id)
+                state = step_res["state"]
+                done = step_res["done"]
+
+            winner = int(state["winner"])
+            for obs, player_at_step, mask_at_step, act_taken, ab_act in traj:
+                my_bb, opp_bb = _canonical_tensor_to_bitboards(obs)
+                teacher_pi, teacher_val = _compute_tactical_teacher_policy(
+                    my_bb, opp_bb, mask_at_step
+                )
+                extra_bm = _zero_prob_blunder_mask(teacher_pi, mask_at_step)
+
+                if player_at_step == nn_player:
+                    # Boost the depth-3 Alpha-Beta move if it is fork-safe
+                    if teacher_pi[ab_act] > 0:
+                        target_pi = 0.25 * teacher_pi
+                        target_pi[ab_act] += 0.75
+                        target_pi /= target_pi.sum()
+                    else:
+                        target_pi = teacher_pi
+                    # If the pure model lost this game and deviated from the safe teacher move,
+                    # explicitly mark the losing move in extra_bm so margin loss suppresses it
+                    if winner != 0 and winner != nn_player and act_taken != ab_act and target_pi[ab_act] > 0.2:
+                        target_pi[act_taken] = 0.0
+                        s_tot = float(target_pi.sum())
+                        if s_tot > 1e-8:
+                            target_pi /= s_tot
+                        extra_bm |= 1 << act_taken
+                else:
+                    # If the opponent won, also learn from the opponent's winning move if fork-safe
+                    if winner == player_at_step and teacher_pi[act_taken] > 0:
+                        target_pi = 0.25 * teacher_pi
+                        target_pi[act_taken] += 0.75
+                        target_pi /= target_pi.sum()
+                    else:
+                        target_pi = teacher_pi
+
+                if winner == 0:
+                    z = 0.5 * teacher_val
+                elif winner == player_at_step:
+                    z = 0.7 * 1.0 + 0.3 * teacher_val
+                else:
+                    z = 0.7 * (-1.0) + 0.3 * teacher_val
+
+                samples_added += buffer.add_sample(
+                    state=obs,
+                    policy=target_pi,
+                    value=z,
+                    valid_mask=mask_at_step,
+                    augment=augment,
+                    rectify_tactical=True,
+                    extra_blunder_mask=extra_bm,
+                )
+
+    return samples_added
+
+
 def generate_tactical_threat_curriculum(
     buffer: ReplayBuffer,
     num_games: int = 64,
     augment: bool = True,
     rng: Optional[np.random.Generator] = None,
 ) -> int:
-    """Mines 1-ply win, 1-ply forced-block, and poison-column states across all 76 winning lines."""
+    """Mines 1-ply win, 1-ply forced-block, and tactical states across all 76 winning lines."""
     generator = rng if rng is not None else np.random.default_rng()
     samples_added = 0
 
+    # Phase A: Direct 76-line x 4-cell targeted win & forced-block drills across all heights/diagonals
+    num_line_drills = max(1, num_games)
+    for drill_idx in range(num_line_drills):
+        line_idx = int((drill_idx * 7 + int(generator.integers(0, 76))) % len(WIN_LINE_MASKS))
+        mask = WIN_LINE_MASKS[line_idx]
+        bits = [b for b in range(64) if (mask & (1 << b)) != 0]
+        missing_b = int(bits[int(generator.integers(0, 4))])
+        col_missing = missing_b % 16
+        z_missing = missing_b // 16
+        three_bits = [b for b in bits if b != missing_b]
+
+        # Skip vertical line case where missing_b is below another bit on the same line
+        if any((b % 16) == col_missing and (b // 16) > z_missing for b in three_bits):
+            continue
+
+        my_bb = 0
+        opp_bb = 0
+        for b in three_bits:
+            opp_bb |= 1 << b
+
+        # Fill gravity support columns underneath all 4 cells of the line
+        for b in bits:
+            col = b % 16
+            zb = b // 16
+            for z_u in range(zb):
+                bit_u = col + 16 * z_u
+                if ((my_bb | opp_bb) & (1 << bit_u)) == 0:
+                    if float(generator.random()) < 0.5:
+                        my_bb |= 1 << bit_u
+                    else:
+                        opp_bb |= 1 << bit_u
+
+        # Add 2..8 random distractor balls in other columns to diversify board contexts
+        num_distractors = int(generator.integers(2, 9))
+        for _ in range(num_distractors):
+            d_col = int(generator.integers(0, 16))
+            if d_col == col_missing:
+                continue
+            lbit = landing_bit_for_action(my_bb | opp_bb, d_col)
+            if lbit is not None and (mask & (1 << lbit)) == 0:
+                if float(generator.random()) < 0.5:
+                    if not check_bitboard_win(my_bb | (1 << lbit)):
+                        my_bb |= 1 << lbit
+                else:
+                    if not check_bitboard_win(opp_bb | (1 << lbit)):
+                        opp_bb |= 1 << lbit
+
+        occ = my_bb | opp_bb
+        if check_bitboard_win(my_bb) or check_bitboard_win(opp_bb):
+            continue
+
+        # 1. Forced 4th-ball block drill (opponent has 3-in-a-row on `mask`)
+        obs_blk, vmask_blk = _build_canonical_from_bitboards(my_bb, opp_bb)
+        if vmask_blk != 0:
+            pi_blk, val_blk = _compute_tactical_teacher_policy(my_bb, opp_bb, vmask_blk)
+            samples_added += buffer.add_sample(
+                state=obs_blk,
+                policy=pi_blk,
+                value=val_blk,
+                valid_mask=vmask_blk,
+                augment=augment,
+                rectify_tactical=True,
+            )
+
+        # 2. Immediate 4th-ball win drill (active player has 3-in-a-row on `mask`)
+        obs_win, vmask_win = _build_canonical_from_bitboards(opp_bb, my_bb)
+        if vmask_win != 0:
+            pi_win, val_win = _compute_tactical_teacher_policy(opp_bb, my_bb, vmask_win)
+            samples_added += buffer.add_sample(
+                state=obs_win,
+                policy=pi_win,
+                value=val_win,
+                valid_mask=vmask_win,
+                augment=augment,
+                rectify_tactical=True,
+            )
+
+    # Phase B: Mixed tactical + heuristic game rollouts
     for _ in range(num_games):
         white_bb = 0
         black_bb = 0
@@ -475,32 +846,27 @@ def generate_tactical_threat_curriculum(
             if valid_mask == 0:
                 break
 
+            teacher_pi, teacher_val = _compute_tactical_teacher_policy(my_bb, opp_bb, valid_mask)
             win_mask, blunder_mask, forced_loss = compute_tactical_action_masks(obs, valid_mask)
-            if win_mask != 0 or blunder_mask != 0 or forced_loss:
-                uniform_pi = np.zeros(NUM_ACTIONS, dtype=np.float32)
-                for a in range(NUM_ACTIONS):
-                    if (valid_mask & (1 << a)) != 0:
-                        uniform_pi[a] = 1.0
-                uniform_pi /= max(float(uniform_pi.sum()), 1.0)
-                val_target = 1.0 if win_mask != 0 else (-1.0 if forced_loss else 0.0)
+            if win_mask != 0 or blunder_mask != 0 or forced_loss or float(generator.random()) < 0.35:
                 samples_added += buffer.add_sample(
                     state=obs,
-                    policy=uniform_pi,
-                    value=val_target,
+                    policy=teacher_pi,
+                    value=teacher_val,
                     valid_mask=valid_mask,
                     augment=augment,
                     rectify_tactical=True,
                 )
 
             legal = [a for a in range(NUM_ACTIONS) if (valid_mask & (1 << a)) != 0]
-            # Play a safe or tactical move 50% of the time so games reach deep multi-threat states,
-            # and a random move 50% of the time so opponent 3-in-a-row threats are left unblocked.
             safe_actions = [a for a in legal if (blunder_mask & (1 << a)) == 0]
             if win_mask != 0 and float(generator.random()) < 0.5:
                 win_actions = [a for a in legal if (win_mask & (1 << a)) != 0]
                 act = int(generator.choice(win_actions))
-            elif len(safe_actions) > 0 and float(generator.random()) < 0.65:
-                act = int(generator.choice(safe_actions))
+            elif len(safe_actions) > 0 and float(generator.random()) < 0.75:
+                probs = np.array([max(float(teacher_pi[a]), 1e-4) for a in safe_actions], dtype=np.float64)
+                probs /= probs.sum()
+                act = int(generator.choice(safe_actions, p=probs))
             else:
                 act = int(generator.choice(legal))
 
@@ -567,19 +933,21 @@ def generate_vectorized_rollouts(
             if dones[i]:
                 episodes_completed += 1
                 winner = int(winners[i])
-                for s_obs, s_pi, s_player, s_mask, s_act in active_trajectories[i]:
+                for s_obs, _, s_player, s_mask, s_act in active_trajectories[i]:
+                    my_bb, opp_bb = _canonical_tensor_to_bitboards(s_obs)
+                    teacher_pi, teacher_val = _compute_tactical_teacher_policy(my_bb, opp_bb, s_mask)
                     _, step_blunder_mask, _ = compute_tactical_action_masks(s_obs, s_mask)
                     if (step_blunder_mask & (1 << s_act)) != 0:
                         # Heavily penalize any step that chose a 1-ply losing move
                         z = -1.0
                     elif winner == 0:
-                        z = 0.0
+                        z = 0.5 * teacher_val
                     elif winner == s_player:
-                        z = 1.0
+                        z = 0.5 * 1.0 + 0.5 * teacher_val
                     else:
-                        z = -1.0
+                        z = 0.5 * (-1.0) + 0.5 * teacher_val
                     samples_added += buffer.add_sample(
-                        s_obs, s_pi, z, valid_mask=s_mask, augment=augment
+                        s_obs, teacher_pi, z, valid_mask=s_mask, augment=augment
                     )
                 active_trajectories[i].clear()
 

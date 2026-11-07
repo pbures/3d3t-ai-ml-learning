@@ -12,10 +12,128 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 IN_CHANNELS = 3
+GEO_CHANNELS = 8
+STEM_CHANNELS = IN_CHANNELS + GEO_CHANNELS
 GRID_DIM = 4
 GRID_CELLS = 64
 NUM_ACTIONS = 16
+NUM_WIN_LINES = 76
 ILLEGAL_LOGIT_VALUE = -1e9
+
+
+def _build_win_line_matrix() -> torch.Tensor:
+    """Builds the (76, 64) float32 binary incidence matrix for all 76 winning 4-in-a-row lines."""
+    lines = []
+
+    def add_line(coords: list[Tuple[int, int, int]]) -> None:
+        row = [0.0] * GRID_CELLS
+        for x, y, z in coords:
+            row[16 * z + 4 * y + x] = 1.0
+        lines.append(row)
+
+    # 1. Orthogonal lines along X, Y, Z (48)
+    for z in range(4):
+        for y in range(4):
+            add_line([(x, y, z) for x in range(4)])
+    for z in range(4):
+        for x in range(4):
+            add_line([(x, y, z) for y in range(4)])
+    for y in range(4):
+        for x in range(4):
+            add_line([(x, y, z) for z in range(4)])
+
+    # 2. 2D Planar diagonals in XY, XZ, YZ planes (24)
+    for z in range(4):
+        add_line([(i, i, z) for i in range(4)])
+        add_line([(i, 3 - i, z) for i in range(4)])
+    for y in range(4):
+        add_line([(i, y, i) for i in range(4)])
+        add_line([(i, y, 3 - i) for i in range(4)])
+    for x in range(4):
+        add_line([(x, i, i) for i in range(4)])
+        add_line([(x, i, 3 - i) for i in range(4)])
+
+    # 3. 3D Space diagonals (4)
+    add_line([(i, i, i) for i in range(4)])
+    add_line([(3 - i, i, i) for i in range(4)])
+    add_line([(i, 3 - i, i) for i in range(4)])
+    add_line([(i, i, 3 - i) for i in range(4)])
+
+    return torch.tensor(lines, dtype=torch.float32)
+
+
+_WIN_LINE_MATRIX: torch.Tensor = _build_win_line_matrix()
+
+
+def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
+    """Augments canonical (B, 3, 4, 4, 4) input with 8 exact 76-line geometric ray feature planes.
+
+    Returns a (B, 11, 4, 4, 4) volumetric tensor:
+      - Channels 0..2: Raw canonical planes (MyPieces, OpponentPieces, GravitySurface)
+      - Channel 3: Immediate 1-ply winning cells on the gravity surface
+      - Channel 4: Immediate 1-ply opponent threat (forced 4th-ball block) cells on gravity surface
+      - Channel 5: Poison gravity cells (playing at z immediately unlocks opponent 4th-ball win at z+1)
+      - Channel 6: Self-trap gravity cells (playing at z unlocks own 4th-ball at z+1 for opponent to block)
+      - Channel 7: Volumetric density of own unblocked 3-in-a-row empty completion cells
+      - Channel 8: Volumetric density of opponent unblocked 3-in-a-row empty completion cells
+      - Channel 9: Volumetric density of own open 2-in-a-row fork/threat lines per empty cell
+      - Channel 10: Volumetric density of opponent open 2-in-a-row fork/threat lines per empty cell
+    """
+    bsz = x.size(0)
+    w_mat = _WIN_LINE_MATRIX.to(device=x.device, dtype=x.dtype)  # (76, 64)
+    w_mat_t = w_mat.t()  # (64, 76)
+
+    flat = x.reshape(bsz, IN_CHANNELS, GRID_CELLS)
+    my = (flat[:, 0, :] > 0.5).to(x.dtype)
+    opp = (flat[:, 1, :] > 0.5).to(x.dtype)
+    surf = (flat[:, 2, :] > 0.5).to(x.dtype)
+    empty = ((my < 0.5) & (opp < 0.5)).to(x.dtype)
+
+    my_cnt = torch.matmul(my, w_mat_t)    # (B, 76)
+    opp_cnt = torch.matmul(opp, w_mat_t)  # (B, 76)
+
+    my_open = opp_cnt < 0.5
+    opp_open = my_cnt < 0.5
+
+    l_my3 = ((my_cnt > 2.5) & (my_cnt < 3.5) & my_open).to(x.dtype)
+    l_opp3 = ((opp_cnt > 2.5) & (opp_cnt < 3.5) & opp_open).to(x.dtype)
+    l_my2 = ((my_cnt > 1.5) & (my_cnt < 2.5) & my_open).to(x.dtype)
+    l_opp2 = ((opp_cnt > 1.5) & (opp_cnt < 2.5) & opp_open).to(x.dtype)
+
+    cell_my3 = (empty * torch.matmul(l_my3, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    cell_opp3 = (empty * torch.matmul(l_opp3, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    cell_my2 = (empty * torch.matmul(l_my2, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    cell_opp2 = (empty * torch.matmul(l_opp2, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    surf_3d = surf.reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+
+    imm_win_surf = surf_3d * (cell_my3 > 0.5).to(x.dtype)
+    imm_blk_surf = surf_3d * (cell_opp3 > 0.5).to(x.dtype)
+
+    poison_surf = torch.zeros_like(surf_3d)
+    poison_surf[:, :3, :, :] = surf_3d[:, :3, :, :] * (cell_opp3[:, 1:, :, :] > 0.5).to(x.dtype)
+
+    self_trap_surf = torch.zeros_like(surf_3d)
+    self_trap_surf[:, :3, :, :] = surf_3d[:, :3, :, :] * (cell_my3[:, 1:, :, :] > 0.5).to(x.dtype)
+
+    my3_vol = torch.clamp(cell_my3, max=2.0) * 0.5
+    opp3_vol = torch.clamp(cell_opp3, max=2.0) * 0.5
+    my2_vol = torch.clamp(cell_my2, max=4.0) * 0.25
+    opp2_vol = torch.clamp(cell_opp2, max=4.0) * 0.25
+
+    geo = torch.stack(
+        [
+            imm_win_surf,
+            imm_blk_surf,
+            poison_surf,
+            self_trap_surf,
+            my3_vol,
+            opp3_vol,
+            my2_vol,
+            opp2_vol,
+        ],
+        dim=1,
+    )
+    return torch.cat([x, geo], dim=1)
 
 
 def valid_mask_to_tensor(
@@ -75,18 +193,22 @@ def mask_illegal_logits(
 
 
 class ResBlock3D(nn.Module):
-    """3D Residual Block with two 3x3x3 volumetric convolutions and skip connection."""
+    """3D Residual Block combining local 3x3x3 conv and full-cube 4x4x4 global conv."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm3d(channels)
+        self.conv_global = nn.Conv3d(channels, channels, kernel_size=GRID_DIM, padding=0, bias=False)
+        self.bn_global = nn.BatchNorm3d(channels)
         self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm3d(channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
-        out = F.relu(self.bn1(self.conv1(x)))
+        local_feat = self.bn1(self.conv1(x))
+        global_feat = self.bn_global(self.conv_global(x))
+        out = F.relu(local_feat + global_feat)
         out = self.bn2(self.conv2(out))
         return F.relu(out + residual)
 
@@ -110,11 +232,11 @@ class TTT3DNet(nn.Module):
         self.channels = channels
         self.num_blocks = num_blocks
 
-        # Stem 3D convolution
-        self.stem_conv = nn.Conv3d(IN_CHANNELS, channels, kernel_size=3, padding=1, bias=False)
+        # Stem 3D convolution over 11 channels (3 raw + 8 76-line geometric planes)
+        self.stem_conv = nn.Conv3d(STEM_CHANNELS, channels, kernel_size=3, padding=1, bias=False)
         self.stem_bn = nn.BatchNorm3d(channels)
 
-        # Residual tower
+        # Residual tower (3x3x3 local + 4x4x4 full-board global receptive field)
         self.res_blocks = nn.ModuleList([ResBlock3D(channels) for _ in range(num_blocks)])
 
         # Policy Head: 1x1x1 Conv3d -> BN -> ReLU -> Linear -> 16 column logits
@@ -137,7 +259,8 @@ class TTT3DNet(nn.Module):
             raise ValueError(
                 f"Expected input tensor shape (B, 3, 4, 4, 4), got {tuple(x.shape)}"
             )
-        h = F.relu(self.stem_bn(self.stem_conv(x)))
+        stem_in = extract_geometric_features(x)
+        h = F.relu(self.stem_bn(self.stem_conv(stem_in)))
         for block in self.res_blocks:
             h = block(h)
 
@@ -270,6 +393,7 @@ class TTT3DNet(nn.Module):
         add_pair(*fuse_conv_bn(self.stem_conv, self.stem_bn))
         for block in self.res_blocks:
             add_pair(*fuse_conv_bn(block.conv1, block.bn1))
+            add_pair(*fuse_conv_bn(block.conv_global, block.bn_global))
             add_pair(*fuse_conv_bn(block.conv2, block.bn2))
 
         add_pair(*fuse_conv_bn(self.policy_conv, self.policy_bn))
