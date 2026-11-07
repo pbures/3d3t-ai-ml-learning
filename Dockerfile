@@ -10,6 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 
 # Stage 2: Minimal runtime image
 FROM alpine:3.19
+LABEL org.opencontainers.image.source="https://github.com/pbures/3d3t-ai-ml-learning"
+LABEL org.opencontainers.image.description="3T3D Arena Server & 3D Web Replay UI"
 
 RUN apk --no-cache add ca-certificates && adduser -D -u 10001 appuser
 USER appuser
