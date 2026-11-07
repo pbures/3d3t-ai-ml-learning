@@ -10,6 +10,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
+import torch
 
 from .network import NUM_ACTIONS, TTT3DNet
 
@@ -283,19 +284,34 @@ class NeuralArenaBot:
             candidates = non_fork_vulnerable
 
         # 6. Batched 1-ply Neural Value + Policy evaluation over candidate moves
-        # Combines TTT3DNet policy prior pi(a|s) with 1-ply value lookahead -v(s')
-        best_candidate = candidates[0]
-        best_combined_score = -1e9
+        # Combines TTT3DNet policy prior pi(a|s) with 1-ply value lookahead -v(s') in a single batched forward pass
+        next_obs_list: List[np.ndarray] = []
+        threat_bonuses: List[float] = []
         for a in candidates:
             lbit = landing_bit_for_action(occupied, a)
             assert lbit is not None
             next_my_bb = my_bb | (1 << lbit)
-            next_obs, next_mask = _build_canonical_from_bitboards(opp_bb, next_my_bb)
-            _, opp_val = self.model.predict(next_obs, valid_mask=next_mask)
-            my_next_val = -float(opp_val)
-            # Small bonus for creating a 1-ply threat that forces opponent's reply
-            threat_bonus = 0.15 * len(find_immediate_wins(next_my_bb, occupied | (1 << lbit)))
-            combined = float(probs[a]) + 0.5 * my_next_val + threat_bonus
+            next_obs, _ = _build_canonical_from_bitboards(opp_bb, next_my_bb)
+            next_obs_list.append(next_obs)
+            threat_bonuses.append(0.15 * len(find_immediate_wins(next_my_bb, occupied | (1 << lbit))))
+
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            dev = next(self.model.parameters()).device
+            batch_t = torch.from_numpy(np.stack(next_obs_list, axis=0)).to(dev)
+            with torch.no_grad():
+                _, opp_vals_t = self.model(batch_t)
+            opp_vals = opp_vals_t.squeeze(-1).cpu().numpy()
+        finally:
+            if was_training:
+                self.model.train()
+
+        best_candidate = candidates[0]
+        best_combined_score = -1e9
+        for idx, a in enumerate(candidates):
+            my_next_val = -float(opp_vals[idx])
+            combined = float(probs[a]) + 0.5 * my_next_val + threat_bonuses[idx]
             if combined > best_combined_score:
                 best_combined_score = combined
                 best_candidate = a
