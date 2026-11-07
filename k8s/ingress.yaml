@@ -15,7 +15,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: 3t3d-arena-svc
+                name: arena-3t3d-svc
                 port:
                   number: 80
   tls:
