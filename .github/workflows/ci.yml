@@ -1,0 +1,42 @@
+name: CI — Tests & 90% Coverage Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-coverage:
+    name: Go Unit & Integration Tests (>= 90% Coverage)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Build binaries
+        run: go build -v ./cmd/...
+
+      - name: Run Unit & Integration Tests with Race Detector and Coverage
+        run: |
+          go test -v -race ./internal/... -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tee coverage.txt
+
+      - name: Enforce >= 90% Code Coverage Threshold
+        run: |
+          TOTAL_COV=$(awk '/^total:/ {gsub(/%/, "", $3); print $3}' coverage.txt)
+          echo "Detected total statement coverage: ${TOTAL_COV}%"
+          awk -v cov="$TOTAL_COV" 'BEGIN {
+            if (cov + 0 < 90.0) {
+              printf "::error::Code coverage %.1f%% is below the required 90.0%% threshold!\n", cov
+              exit 1
+            }
+            printf "Code coverage check passed: %.1f%% >= 90.0%%\n", cov
+          }'
