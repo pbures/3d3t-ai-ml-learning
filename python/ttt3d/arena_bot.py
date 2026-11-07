@@ -82,6 +82,33 @@ def landing_bit_for_action(occupied_mask: int, action: int) -> Optional[int]:
     return None
 
 
+def find_immediate_wins(player_bb: int, occupied_mask: int) -> List[int]:
+    """Returns all legal column actions (0..15) that immediately form a 4-in-a-row for `player_bb`."""
+    wins: List[int] = []
+    for a in range(NUM_ACTIONS):
+        lbit = landing_bit_for_action(occupied_mask, a)
+        if lbit is not None and check_bitboard_win(player_bb | (1 << lbit)):
+            wins.append(a)
+    return wins
+
+
+def _build_canonical_from_bitboards(my_bb: int, opp_bb: int) -> Tuple[np.ndarray, int]:
+    occupied = my_bb | opp_bb
+    valid_mask = 0
+    flat = np.zeros(192, dtype=np.float32)
+    for bit in range(64):
+        if (my_bb & (1 << bit)) != 0:
+            flat[bit] = 1.0
+        if (opp_bb & (1 << bit)) != 0:
+            flat[64 + bit] = 1.0
+    for a in range(NUM_ACTIONS):
+        lbit = landing_bit_for_action(occupied, a)
+        if lbit is not None:
+            valid_mask |= 1 << a
+            flat[128 + lbit] = 1.0
+    return flat.reshape(3, 4, 4, 4), valid_mask
+
+
 def state_dto_to_canonical_tensor(state_dto: Dict[str, Any]) -> Tuple[np.ndarray, int]:
     """Extracts the (3, 4, 4, 4) float32 canonical tensor and 16-bit valid_moves_mask from GameStateDTO."""
     white_bb = int(state_dto.get("white_bitboard", 0))
@@ -162,11 +189,7 @@ class NeuralArenaBot:
         occupied = white_bb | black_bb
 
         # 1. Check for immediate 1-ply winning moves for active player
-        winning_moves: List[int] = []
-        for a in legal_actions:
-            lbit = landing_bit_for_action(occupied, a)
-            if lbit is not None and check_bitboard_win(my_bb | (1 << lbit)):
-                winning_moves.append(a)
+        winning_moves = find_immediate_wins(my_bb, occupied)
         if winning_moves:
             best_win = max(winning_moves, key=lambda a: float(probs[a]))
             return {
@@ -177,13 +200,16 @@ class NeuralArenaBot:
             }
 
         # 2. Check for forced 1-ply blocks if opponent threatens an immediate win on their next turn
-        blocking_moves: List[int] = []
-        for a in legal_actions:
-            lbit = landing_bit_for_action(occupied, a)
-            if lbit is not None and check_bitboard_win(opp_bb | (1 << lbit)):
-                blocking_moves.append(a)
+        blocking_moves = find_immediate_wins(opp_bb, occupied)
         if blocking_moves:
-            best_block = max(blocking_moves, key=lambda a: float(probs[a]))
+            # Prefer a block that does not immediately give the opponent a win right above it
+            safe_blocks = [
+                a
+                for a in blocking_moves
+                if not find_immediate_wins(opp_bb, occupied | (1 << (landing_bit_for_action(occupied, a) or 0)))
+            ]
+            pool = safe_blocks if safe_blocks else blocking_moves
+            best_block = max(pool, key=lambda a: float(probs[a]))
             return {
                 "action": int(best_block),
                 "value": float(value),
@@ -191,32 +217,95 @@ class NeuralArenaBot:
                 "reason": "forced_block",
             }
 
-        # 3. Filter out blunders that hand the opponent an immediate winning landing spot directly above (z+1)
+        # 3. Filter out blunders that hand the opponent an immediate 1-ply win on their reply
         safe_moves: List[int] = []
         for a in legal_actions:
             lbit = landing_bit_for_action(occupied, a)
             if lbit is None:
                 continue
             next_occupied = occupied | (1 << lbit)
-            above_bit = landing_bit_for_action(next_occupied, a)
-            if above_bit is not None and check_bitboard_win(opp_bb | (1 << above_bit)):
+            if find_immediate_wins(opp_bb, next_occupied):
                 continue
             safe_moves.append(a)
 
-        if safe_moves and action not in safe_moves:
-            best_safe = max(safe_moves, key=lambda a: float(probs[a]))
+        candidates = safe_moves if safe_moves else legal_actions
+
+        # 4. Check if any safe move creates an unstoppable double-threat fork (2+ winning moves next turn)
+        fork_moves: List[int] = []
+        for a in candidates:
+            lbit = landing_bit_for_action(occupied, a)
+            if lbit is None:
+                continue
+            next_my_bb = my_bb | (1 << lbit)
+            next_occ = occupied | (1 << lbit)
+            if len(find_immediate_wins(next_my_bb, next_occ)) >= 2:
+                fork_moves.append(a)
+        if fork_moves:
+            best_fork = max(fork_moves, key=lambda a: float(probs[a]))
             return {
-                "action": int(best_safe),
+                "action": int(best_fork),
                 "value": float(value),
                 "policy": [float(p) for p in probs],
-                "reason": "neural_safe_policy",
+                "reason": "offensive_fork",
             }
 
+        # 5. Filter out moves that allow the opponent to play a reply creating an unstoppable double-threat fork
+        non_fork_vulnerable: List[int] = []
+        for a in candidates:
+            lbit = landing_bit_for_action(occupied, a)
+            if lbit is None:
+                continue
+            next_my_bb = my_bb | (1 << lbit)
+            next_occ = occupied | (1 << lbit)
+            my_threats = find_immediate_wins(next_my_bb, next_occ)
+
+            opp_can_fork = False
+            # If we threaten a 1-ply win, opponent is forced to block it
+            opp_replies = my_threats if my_threats else [
+                r for r in range(NUM_ACTIONS) if landing_bit_for_action(next_occ, r) is not None
+            ]
+            for r in opp_replies:
+                r_bit = landing_bit_for_action(next_occ, r)
+                if r_bit is None:
+                    continue
+                opp_after = opp_bb | (1 << r_bit)
+                occ_after = next_occ | (1 << r_bit)
+                if check_bitboard_win(opp_after):
+                    opp_can_fork = True
+                    break
+                if len(find_immediate_wins(opp_after, occ_after)) >= 2 and not find_immediate_wins(next_my_bb, occ_after):
+                    opp_can_fork = True
+                    break
+            if not opp_can_fork:
+                non_fork_vulnerable.append(a)
+
+        if non_fork_vulnerable:
+            candidates = non_fork_vulnerable
+
+        # 6. Batched 1-ply Neural Value + Policy evaluation over candidate moves
+        # Combines TTT3DNet policy prior pi(a|s) with 1-ply value lookahead -v(s')
+        best_candidate = candidates[0]
+        best_combined_score = -1e9
+        for a in candidates:
+            lbit = landing_bit_for_action(occupied, a)
+            assert lbit is not None
+            next_my_bb = my_bb | (1 << lbit)
+            next_obs, next_mask = _build_canonical_from_bitboards(opp_bb, next_my_bb)
+            _, opp_val = self.model.predict(next_obs, valid_mask=next_mask)
+            my_next_val = -float(opp_val)
+            # Small bonus for creating a 1-ply threat that forces opponent's reply
+            threat_bonus = 0.15 * len(find_immediate_wins(next_my_bb, occupied | (1 << lbit)))
+            combined = float(probs[a]) + 0.5 * my_next_val + threat_bonus
+            if combined > best_combined_score:
+                best_combined_score = combined
+                best_candidate = a
+
+        reason = "neural_safe_policy" if (safe_moves and action not in candidates) else "neural_policy"
         return {
-            "action": int(action),
+            "action": int(best_candidate),
             "value": float(value),
             "policy": [float(p) for p in probs],
-            "reason": "neural_policy",
+            "reason": reason,
         }
 
 

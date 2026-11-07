@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .arena_bot import NeuralArenaBot
 from .grpc_client import VectorizedEnvClient
 from .network import NUM_ACTIONS, TTT3DNet
 from .symmetry import NUM_SYMMETRIES, transform_policy, transform_state, transform_valid_mask
@@ -326,13 +327,19 @@ def evaluate_against_baseline(
     opponent: str = "random",
     num_games: int = 10,
     simulations: int = 32,
+    use_tactical_lookahead: bool = True,
 ) -> Dict[str, Any]:
-    """Benchmarks `model` (greedy temp=0) against a Go baseline agent over `num_games`."""
+    """Benchmarks `model` (wrapped in `NeuralArenaBot`) against a Go baseline agent over `num_games`."""
     if num_games <= 0:
         raise ValueError("num_games must be positive")
     wins = 0
     draws = 0
     losses = 0
+    bot = NeuralArenaBot(
+        model=model,
+        temperature=0.0,
+        use_tactical_lookahead=use_tactical_lookahead,
+    )
 
     for g_idx in range(num_games):
         game_id = f"eval_{opponent}_{g_idx}"
@@ -342,11 +349,8 @@ def evaluate_against_baseline(
 
         while not done:
             if int(state["current_player"]) == nn_player:
-                action, _, _ = model.select_action(
-                    state["obs"],
-                    valid_mask=int(state["valid_moves_mask"]),
-                    temperature=0.0,
-                )
+                decision = bot.choose_move(state)
+                action = int(decision["action"])
             else:
                 bot_res = client.select_action(
                     agent=opponent, game_id=game_id, simulations=simulations
