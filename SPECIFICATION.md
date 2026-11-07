@@ -14,11 +14,13 @@
 
 ### 2.1 The 3D Grid (State Space)
 * **Dimensions:** $4 \times 4 \times 4$ discrete coordinates $(x, y, z)$ where:
-  * $x \in \{0, 1, 2, 3\}$ (Width / Column)
-  * $y \in \{0, 1, 2, 3\}$ (Depth / Row)
-  * $z \in \{0, 1, 2, 3\}$ (Height / Level, where $z = 0$ is the bottom layer and $z = 3$ is the top layer).
+  * $x \in \lbrace 0, 1, 2, 3 \rbrace$ (Width / Column)
+  * $y \in \lbrace 0, 1, 2, 3 \rbrace$ (Depth / Row)
+  * $z \in \lbrace 0, 1, 2, 3 \rbrace$ (Height / Level, where $z = 0$ is the bottom layer and $z = 3$ is the top layer).
 * **Bitboard Mapping:** Because $4 \times 4 \times 4 = 64$, the entire 3D grid maps bijectively to the 64 bits of an unsigned 64-bit integer (`uint64`):
-  $$\text{bit\_index}(x, y, z) = 16z + 4y + x \in \{0, \dots, 63\}$$
+
+$$\text{bitIndex}(x, y, z) = 16z + 4y + x \in \lbrace 0, \dots, 63 \rbrace$$
+
 * **Complete Board State:** Represented compactly by two `uint64` bitboards:
   * `White uint64`: Bits set to `1` where White balls are placed.
   * `Black uint64`: Bits set to `1` where Black balls are placed.
@@ -28,10 +30,14 @@
 * `WHITE` always makes the first move on an empty board.
 
 ### 2.3 Action Space & Gravity Rule
-* **Action Selection:** On their turn, a player chooses an $(x, y)$ vertical column/peg, encoded as a discrete action $a \in \{0, \dots, 15\}$:
-  $$a = 4y + x$$
+* **Action Selection:** On their turn, a player chooses an $(x, y)$ vertical column/peg, encoded as a discrete action $a \in \lbrace 0, \dots, 15 \rbrace$:
+
+$$a = 4y + x$$
+
 * **Gravity Resolution:** A ball placed in column $(x, y)$ falls to the lowest unoccupied $z$ coordinate:
-  $$z = \min \{ k \in \{0, 1, 2, 3\} \mid \text{bit}(x, y, k) \notin (\text{White} \cup \text{Black}) \}$$
+
+$$z = \min \lbrace k \in \lbrace 0, 1, 2, 3 \rbrace \mid \text{bitIndex}(x, y, k) \notin (\text{White} \cup \text{Black}) \rbrace$$
+
 * **Move Legality:** An action $a = (x, y)$ is legal if and only if the top cell $(x, y, 3)$ is empty. The set of legal moves for any board state is represented as a 16-bit mask (`uint16`).
 
 ### 2.4 Terminal Conditions (Win / Draw)
@@ -140,9 +146,9 @@ Integration tests (over both HTTPS and gRPC) must explicitly verify **all rules 
 
 | Rule ID | Specification Requirement | Required Integration Test Verification |
 | :--- | :--- | :--- |
-| **Rule 2.1 (Grid)** | $4 \times 4 \times 4$ grid (64 places), $x,y,z \in \{0..3\}$ | Verify out-of-bounds coordinates/actions ($\notin \{0..15\}$) are rejected and all 64 cells map accurately to $(x, y, z)$. |
+| **Rule 2.1 (Grid)** | $4 \times 4 \times 4$ grid (64 places), $x,y,z \in \lbrace 0..3 \rbrace$ | Verify out-of-bounds coordinates/actions ($\notin \lbrace 0..15 \rbrace$) are rejected and all 64 cells map accurately to $(x, y, z)$. |
 | **Rule 2.2 (Turns)** | Two players (`WHITE`, `BLACK`) alternate in rounds | Verify `WHITE` starts first, turn switches strictly after each valid move, and out-of-turn moves (in HTTPS battle mode) are rejected. |
-| **Rule 2.3a (Gravity)** | Ball placed at $(x, y)$ lands at lowest empty $z \in \{0..3\}$ | Verify sequential moves in the same $(x, y)$ column land at $z=0, 1, 2, 3$ in order. |
+| **Rule 2.3a (Gravity)** | Ball placed at $(x, y)$ lands at lowest empty $z \in \lbrace 0..3 \rbrace$ | Verify sequential moves in the same $(x, y)$ column land at $z=0, 1, 2, 3$ in order. |
 | **Rule 2.3b (Full Column)** | Column with $z=3$ occupied is illegal | Verify placing a 5th ball in the same $(x, y)$ column is rejected as an invalid move and excluded from the legal move mask. |
 | **Rule 2.4a (Wins)** | First player with 4-in-a-row in any direction wins | Verify win detection across all 3 geometric classes (and all **76 winning lines**):<br>• Orthogonal ($X$-axis, $Y$-axis, $Z$-axis vertical)<br>• 2D Planar diagonals ($XY$, $XZ$, $YZ$ planes)<br>• 3D Space diagonals (corner-to-opposite-corner)<br>Verify no further moves are allowed once a game is won. |
 | **Rule 2.4b (Draw)** | 64 balls placed with no 4-in-a-row results in a Draw | Verify a full 64-move non-winning game sequence terminates in `DRAW` status with $0$ legal moves remaining. |
