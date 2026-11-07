@@ -303,4 +303,36 @@ func TestGRPCIntegration_VectorizedPoolAndTCP(t *testing.T) {
 	if !completedDraw {
 		t.Fatalf("env 76 never completed its 64-move draw trajectory")
 	}
+
+	// Verify Phase 3 Classical Agents (Random, Heuristic, AlphaBeta, MCTS) via SelectAction over gRPC
+	if _, err := client.Reset(ctx, &pb.ResetRequest{GameId: "agent-test"}); err != nil {
+		t.Fatalf("Reset(agent-test) failed: %v", err)
+	}
+	for _, agentName := range []string{"random", "heuristic", "alphabeta", "mcts", ""} {
+		selResp, err := client.SelectAction(ctx, &pb.SelectActionRequest{
+			GameId:      "agent-test",
+			Agent:       agentName,
+			Simulations: 2,
+		})
+		if err != nil {
+			t.Fatalf("SelectAction(%q) failed: %v", agentName, err)
+		}
+		if selResp.Action >= 16 || len(selResp.Policy) != 16 {
+			t.Fatalf("SelectAction(%q) returned invalid action=%d or policy len=%d",
+				agentName, selResp.Action, len(selResp.Policy))
+		}
+		if _, err := client.Step(ctx, &pb.StepRequest{GameId: "agent-test", Action: selResp.Action}); err != nil {
+			t.Fatalf("Step with SelectAction(%q) move %d failed: %v", agentName, selResp.Action, err)
+		}
+	}
+
+	// Verify SelectAction returns FailedPrecondition when called on a finished game
+	winMoves := engine.GenerateWinSequence(0, engine.PlayerWhite)
+	_, _ = client.Reset(ctx, &pb.ResetRequest{GameId: "done-game"})
+	for _, a := range winMoves {
+		_, _ = client.Step(ctx, &pb.StepRequest{GameId: "done-game", Action: uint32(a)})
+	}
+	if _, err := client.SelectAction(ctx, &pb.SelectActionRequest{GameId: "done-game", Agent: "mcts"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition on finished game, got %v", err)
+	}
 }

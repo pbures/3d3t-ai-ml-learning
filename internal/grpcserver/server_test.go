@@ -100,6 +100,17 @@ func TestEnvServerUnitErrorPaths(t *testing.T) {
 	if _, err := srv.BatchStep(ctx, &pb.BatchStepRequest{Actions: []byte{0, 1, 2, 99}}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("expected InvalidArgument for illegal action 99 in BatchStep, got %v", err)
 	}
+
+	// SelectAction error paths
+	if _, err := srv.SelectAction(ctx, nil); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument on nil SelectActionRequest, got %v", err)
+	}
+	if _, err := srv.SelectAction(ctx, &pb.SelectActionRequest{GameId: "missing"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("expected NotFound on SelectAction for missing game, got %v", err)
+	}
+	if _, err := srv.SelectAction(ctx, &pb.SelectActionRequest{GameId: DefaultGameID, Agent: "bad-agent"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument on SelectAction for unknown agent, got %v", err)
+	}
 }
 
 func TestUnimplementedServerAndCodec(t *testing.T) {
@@ -125,6 +136,9 @@ func TestUnimplementedServerAndCodec(t *testing.T) {
 		t.Fatalf("expected Unimplemented")
 	}
 	if _, err := unimp.BatchStep(ctx, &pb.BatchStepRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected Unimplemented")
+	}
+	if _, err := unimp.SelectAction(ctx, &pb.SelectActionRequest{}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("expected Unimplemented")
 	}
 

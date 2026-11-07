@@ -300,4 +300,39 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 			t.Fatalf("expected game list with >= 2 games, got code=%d len=%d", c, len(listPayload.Games))
 		}
 	})
+
+	// -------------------------------------------------------------------------
+	// Phase 3: Built-In AI Move & Built-In Bot Webhook Battle over HTTPS
+	// -------------------------------------------------------------------------
+	t.Run("Phase_3_AI_Move_And_BuiltIn_Bots_Battle_Over_HTTPS", func(t *testing.T) {
+		postJSON(t, client, baseURL+"/api/v1/games", CreateGameRequest{GameID: "https-ai-steps"}, nil)
+
+		for idx, agentName := range []string{"random", "heuristic", "alphabeta", "mcts"} {
+			var mvResp MoveResponseDTO
+			code := postJSON(t, client, baseURL+"/api/v1/games/https-ai-steps/ai-move", AIMoveRequest{Agent: agentName}, &mvResp)
+			if code != http.StatusOK {
+				t.Fatalf("ai-move(%s) failed with HTTP %d", agentName, code)
+			}
+			if mvResp.State.MoveCount != uint8(idx+1) {
+				t.Fatalf("expected move_count=%d after ai-move(%s), got %d", idx+1, agentName, mvResp.State.MoveCount)
+			}
+		}
+
+		// Run a full HTTPS Bot-vs-Bot battle between built-in Heuristic (White) and Random (Black)
+		var matchDTO GameStateDTO
+		code := postJSON(t, client, baseURL+"/api/v1/matches/run", RunMatchRequest{
+			GameID:      "https-builtin-bot-battle",
+			WhiteName:   "Built-in Heuristic",
+			BlackName:   "Built-in Random",
+			WhiteBotURL: baseURL + "/api/v1/bots/heuristic/move",
+			BlackBotURL: baseURL + "/api/v1/bots/random/move",
+			TimeoutMs:   3000,
+		}, &matchDTO)
+		if code != http.StatusOK {
+			t.Fatalf("expected 200 OK from built-in bot match, got %d", code)
+		}
+		if matchDTO.Status == "ONGOING" || matchDTO.MoveCount < 7 {
+			t.Fatalf("expected completed match with >= 7 moves, got status=%s moves=%d", matchDTO.Status, matchDTO.MoveCount)
+		}
+	})
 }

@@ -17,6 +17,7 @@ type EnvServiceClient interface {
 	InitPool(ctx context.Context, in *InitPoolRequest, opts ...grpc.CallOption) (*BatchStateResponse, error)
 	ResetPool(ctx context.Context, in *ResetPoolRequest, opts ...grpc.CallOption) (*BatchStateResponse, error)
 	BatchStep(ctx context.Context, in *BatchStepRequest, opts ...grpc.CallOption) (*BatchStepResponse, error)
+	SelectAction(ctx context.Context, in *SelectActionRequest, opts ...grpc.CallOption) (*SelectActionResponse, error)
 }
 
 type envServiceClient struct {
@@ -90,6 +91,15 @@ func (c *envServiceClient) BatchStep(ctx context.Context, in *BatchStepRequest, 
 	return out, nil
 }
 
+func (c *envServiceClient) SelectAction(ctx context.Context, in *SelectActionRequest, opts ...grpc.CallOption) (*SelectActionResponse, error) {
+	out := new(SelectActionResponse)
+	err := c.cc.Invoke(ctx, "/env3t3d.v1.EnvService/SelectAction", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // EnvServiceServer is the server API for EnvService service.
 type EnvServiceServer interface {
 	Reset(context.Context, *ResetRequest) (*GameState, error)
@@ -99,6 +109,7 @@ type EnvServiceServer interface {
 	InitPool(context.Context, *InitPoolRequest) (*BatchStateResponse, error)
 	ResetPool(context.Context, *ResetPoolRequest) (*BatchStateResponse, error)
 	BatchStep(context.Context, *BatchStepRequest) (*BatchStepResponse, error)
+	SelectAction(context.Context, *SelectActionRequest) (*SelectActionResponse, error)
 }
 
 type UnimplementedEnvServiceServer struct{}
@@ -123,6 +134,9 @@ func (UnimplementedEnvServiceServer) ResetPool(context.Context, *ResetPoolReques
 }
 func (UnimplementedEnvServiceServer) BatchStep(context.Context, *BatchStepRequest) (*BatchStepResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BatchStep not implemented")
+}
+func (UnimplementedEnvServiceServer) SelectAction(context.Context, *SelectActionRequest) (*SelectActionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SelectAction not implemented")
 }
 
 func RegisterEnvServiceServer(s grpc.ServiceRegistrar, srv EnvServiceServer) {
@@ -255,6 +269,24 @@ func _EnvService_BatchStep_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _EnvService_SelectAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EnvServiceServer).SelectAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/env3t3d.v1.EnvService/SelectAction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EnvServiceServer).SelectAction(ctx, req.(*SelectActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var EnvService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "env3t3d.v1.EnvService",
 	HandlerType: (*EnvServiceServer)(nil),
@@ -286,6 +318,10 @@ var EnvService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BatchStep",
 			Handler:    _EnvService_BatchStep_Handler,
+		},
+		{
+			MethodName: "SelectAction",
+			Handler:    _EnvService_SelectAction_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

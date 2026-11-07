@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pbures/3d3t-ai-ml-learning/internal/agents"
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
 )
 
@@ -97,6 +98,11 @@ type PresetRequest struct {
 	Type      string `json:"type"`       // "draw" or "win"
 	LineIndex int    `json:"line_index"` // 0..75 when type == "win"
 	Winner    uint8  `json:"winner"`     // 1 (White) or 2 (Black) when type == "win"
+}
+
+// AIMoveRequest is the JSON payload for `POST /api/v1/games/{id}/ai-move`.
+type AIMoveRequest struct {
+	Agent string `json:"agent"` // "random", "heuristic", "alphabeta", "mcts"
 }
 
 // RunMatchRequest is the JSON payload for `POST /api/v1/matches/run` to orchestrate a remote bot-vs-bot match.
@@ -242,6 +248,7 @@ func (s *ArenaServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/winlines", s.handleWinLines)
 	mux.HandleFunc("/api/v1/games", s.handleGamesRoot)
 	mux.HandleFunc("/api/v1/games/", s.handleGameByID)
+	mux.HandleFunc("/api/v1/bots/", s.handleBotWebhook)
 	mux.HandleFunc("/api/v1/matches/run", s.handleRunMatch)
 	return mux
 }
@@ -421,9 +428,134 @@ func (s *ArenaServer) handleGameByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handlePreset(w, r, gameID)
 
+	case "ai-move":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleAIMove(w, r, gameID)
+
 	default:
 		writeError(w, http.StatusNotFound, fmt.Sprintf("unknown game sub-route %q", subAction))
 	}
+}
+
+func (s *ArenaServer) handleAIMove(w http.ResponseWriter, r *http.Request, gameID string) {
+	var req AIMoveRequest
+	if r.Body != nil {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(bodyBytes)) > 0 {
+			if err := json.Unmarshal(bodyBytes, &req); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON ai-move request")
+				return
+			}
+		}
+	}
+	agentName := strings.TrimSpace(req.Agent)
+	if agentName == "" {
+		agentName = "mcts"
+	}
+
+	s.mu.RLock()
+	sess, exists := s.sessions[gameID]
+	if !exists {
+		s.mu.RUnlock()
+		writeError(w, http.StatusNotFound, fmt.Sprintf("game %q not found", gameID))
+		return
+	}
+	snapshot := sess.game.Clone()
+	s.mu.RUnlock()
+
+	if snapshot.Status != engine.StatusOngoing {
+		writeError(w, http.StatusConflict, engine.ErrGameAlreadyOver.Error())
+		return
+	}
+
+	ag, err := agents.NewAgentByName(agentName, int64(snapshot.MoveCount)+1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	action, err := ag.SelectAction(snapshot)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	s.mu.Lock()
+	rec, err := sess.game.ApplyMove(action)
+	if err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	var reward float32
+	done := sess.game.Status != engine.StatusOngoing
+	if sess.game.Winner != engine.PlayerNone {
+		reward = 1.0
+	}
+	resp := MoveResponseDTO{
+		State: buildStateDTO(sess),
+		LastMove: CoordDTO{
+			Action:     rec.Action,
+			X:          rec.X,
+			Y:          rec.Y,
+			Z:          rec.Z,
+			Player:     uint8(rec.Player),
+			MoveNumber: rec.MoveNumber,
+		},
+		Reward: reward,
+		Done:   done,
+	}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *ArenaServer) handleBotWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/bots/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) != 2 || parts[1] != "move" {
+		writeError(w, http.StatusNotFound, "expected /api/v1/bots/{agent}/move")
+		return
+	}
+	agentName := parts[0]
+
+	var stateDTO GameStateDTO
+	if err := json.NewDecoder(r.Body).Decode(&stateDTO); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid GameStateDTO body")
+		return
+	}
+
+	ag, err := agents.NewAgentByName(agentName, int64(stateDTO.MoveCount)+1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	g := &engine.Game{
+		White:         stateDTO.WhiteBitboard,
+		Black:         stateDTO.BlackBitboard,
+		CurrentPlayer: engine.Player(stateDTO.CurrentPlayer),
+		Status:        engine.GameStatus(stateDTO.StatusCode),
+		MoveCount:     stateDTO.MoveCount,
+	}
+	if g.CurrentPlayer != engine.PlayerWhite && g.CurrentPlayer != engine.PlayerBlack {
+		g.CurrentPlayer = engine.PlayerWhite
+	}
+
+	act, err := ag.SelectAction(g)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	actInt := int(act)
+	writeJSON(w, http.StatusOK, MoveRequest{Action: &actInt})
 }
 
 func resolveMoveAction(req MoveRequest) (uint8, error) {
