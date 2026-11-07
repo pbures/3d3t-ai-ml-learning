@@ -26,6 +26,9 @@ from ttt3d.symmetry import (
 from ttt3d.trainer import (
     ReplayBuffer,
     compute_policy_value_loss,
+    compute_tactical_action_masks,
+    generate_tactical_threat_curriculum,
+    rectify_tactical_sample,
     train_epoch,
 )
 
@@ -240,3 +243,56 @@ def test_observation_unpack_helpers() -> None:
 
     with pytest.raises(ValueError, match="Expected 384 bytes"):
         unpack_batch_observations(raw, num_envs=2)
+
+
+def test_tactical_action_masks_and_rectification() -> None:
+    # 1. Empty mask returns (0, 0, False)
+    empty_state = np.zeros((3, 4, 4, 4), dtype=np.float32)
+    assert compute_tactical_action_masks(empty_state, 0) == (0, 0, False)
+
+    # 2. Immediate 1-ply win on action 3 (my stones at 0, 1, 2 on z=0)
+    win_state = np.zeros((3, 4, 4, 4), dtype=np.float32)
+    win_state[0, 0, 0, 0] = 1.0
+    win_state[0, 0, 0, 1] = 1.0
+    win_state[0, 0, 0, 2] = 1.0
+    win_state[2, 0, :, :] = 1.0
+    wm, bm, fl = compute_tactical_action_masks(win_state, 0xFFFF)
+    assert wm == (1 << 3)
+    assert bm == (0xFFFF & ~(1 << 3))
+    assert fl is False
+
+    zero_pi = np.zeros(16, dtype=np.float32)
+    rect_pi, rect_val, rect_bm = rectify_tactical_sample(win_state, zero_pi, -0.5, 0xFFFF)
+    assert rect_pi[3] == pytest.approx(1.0)
+    assert rect_val == 1.0
+    assert rect_bm == bm
+
+    # 3. Immediate 1-ply forced block on action 3 (opp stones at 0, 1, 2 on z=0)
+    block_state = np.zeros((3, 4, 4, 4), dtype=np.float32)
+    block_state[1, 0, 0, 0] = 1.0
+    block_state[1, 0, 0, 1] = 1.0
+    block_state[1, 0, 0, 2] = 1.0
+    block_state[2, 0, :, :] = 1.0
+    wm2, bm2, fl2 = compute_tactical_action_masks(block_state, 0xFFFF)
+    assert wm2 == 0
+    assert bm2 == (0xFFFF & ~(1 << 3))
+    assert fl2 is False
+
+    rect_pi2, rect_val2, _ = rectify_tactical_sample(block_state, zero_pi, 0.2, 0xFFFF)
+    assert rect_pi2[3] == pytest.approx(1.0)
+    assert rect_val2 == pytest.approx(0.2)
+
+    # 4. Unstoppable opponent fork (opp has two 3-in-a-row threats at 3 and 7)
+    fork_state = block_state.copy()
+    fork_state[1, 0, 1, 0] = 1.0
+    fork_state[1, 0, 1, 1] = 1.0
+    fork_state[1, 0, 1, 2] = 1.0
+    wm3, bm3, fl3 = compute_tactical_action_masks(fork_state, 0xFFFF)
+    assert wm3 == 0 and bm3 == 0 and fl3 is True
+    _, rect_val3, _ = rectify_tactical_sample(fork_state, zero_pi, 0.5, 0xFFFF)
+    assert rect_val3 == -1.0
+
+    # 5. Tactical threat curriculum generator populates ReplayBuffer
+    buf = ReplayBuffer(capacity=1000)
+    added = generate_tactical_threat_curriculum(buf, num_games=6, augment=True, rng=np.random.default_rng(7))
+    assert added > 0 and len(buf) > 0

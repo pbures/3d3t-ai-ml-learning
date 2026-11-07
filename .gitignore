@@ -14,7 +14,7 @@ coverage.txt
 bin/
 *.sock
 
-# Model checkpoints
-checkpoints/
-*.pt
+# Model checkpoints (keep latest canonical checkpoint tracked)
+checkpoints/*
+!checkpoints/ttt3d_latest.pt
 *.pth

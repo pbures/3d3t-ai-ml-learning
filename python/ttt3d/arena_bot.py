@@ -93,6 +93,23 @@ def find_immediate_wins(player_bb: int, occupied_mask: int) -> List[int]:
     return wins
 
 
+def has_unstoppable_threat(attacker_bb: int, defender_bb: int, occupied_mask: int) -> bool:
+    """Returns True if `attacker_bb` has an unstoppable 1-ply win threat (2+ winning columns or a stacked vertical fork)."""
+    threats = find_immediate_wins(attacker_bb, occupied_mask)
+    if not threats:
+        return False
+    if len(threats) >= 2:
+        return True
+    blk = threats[0]
+    b_bit = landing_bit_for_action(occupied_mask, blk)
+    if b_bit is None:
+        return False
+    if check_bitboard_win(defender_bb | (1 << b_bit)):
+        return False
+    occ_after = occupied_mask | (1 << b_bit)
+    return len(find_immediate_wins(attacker_bb, occ_after)) > 0
+
+
 def _build_canonical_from_bitboards(my_bb: int, opp_bb: int) -> Tuple[np.ndarray, int]:
     occupied = my_bb | opp_bb
     valid_mask = 0
@@ -231,7 +248,7 @@ class NeuralArenaBot:
 
         candidates = safe_moves if safe_moves else legal_actions
 
-        # 4. Check if any safe move creates an unstoppable double-threat fork (2+ winning moves next turn)
+        # 4. Check if any safe move creates an unstoppable double-threat or stacked fork
         fork_moves: List[int] = []
         for a in candidates:
             lbit = landing_bit_for_action(occupied, a)
@@ -239,7 +256,7 @@ class NeuralArenaBot:
                 continue
             next_my_bb = my_bb | (1 << lbit)
             next_occ = occupied | (1 << lbit)
-            if len(find_immediate_wins(next_my_bb, next_occ)) >= 2:
+            if has_unstoppable_threat(next_my_bb, opp_bb, next_occ):
                 fork_moves.append(a)
         if fork_moves:
             best_fork = max(fork_moves, key=lambda a: float(probs[a]))
@@ -250,7 +267,7 @@ class NeuralArenaBot:
                 "reason": "offensive_fork",
             }
 
-        # 5. Filter out moves that allow the opponent to play a reply creating an unstoppable double-threat fork
+        # 5. Filter out moves that allow the opponent to play a reply creating an unstoppable double-threat or stacked fork
         non_fork_vulnerable: List[int] = []
         for a in candidates:
             lbit = landing_bit_for_action(occupied, a)
@@ -274,7 +291,7 @@ class NeuralArenaBot:
                 if check_bitboard_win(opp_after):
                     opp_can_fork = True
                     break
-                if len(find_immediate_wins(opp_after, occ_after)) >= 2 and not find_immediate_wins(next_my_bb, occ_after):
+                if has_unstoppable_threat(opp_after, next_my_bb, occ_after) and not find_immediate_wins(next_my_bb, occ_after):
                     opp_can_fork = True
                     break
             if not opp_can_fork:
