@@ -113,7 +113,27 @@ The embedded web interface (`internal/httpserver/web/index.html`) provides:
 
 ---
 
-## 5. Verification Commands & Measured Results
+## 5. Kubernetes, ArgoCD & GitOps Continuous Deployment (`3t3d.buresovi.net`)
+
+### 5.1 Kubernetes & Ingress Architecture
+* **Container Image (`Dockerfile`):** Multi-stage static Go build (`linux/amd64`) packaged in `alpine:3.19` running as non-root user `appuser` (`UID 10001`), listening on `-http-addr=:8080` and `-grpc-endpoint=unix:///tmp/3t3d_train.sock`.
+* **Workloads (`k8s/`):**
+  * `k8s/namespace.yaml`: Dedicated namespace `3t3d`.
+  * `k8s/deployment.yaml`: Single-replica Deployment `3t3d-arena` with readiness & liveness probes on `GET /api/v1/health`.
+  * `k8s/service.yaml`: ClusterIP Service `3t3d-arena-svc` (`80 -> 8080`).
+  * `k8s/ingress.yaml`: Nginx Ingress (`ingressClassName: nginx`) for host `3t3d.buresovi.net` with automated Let's Encrypt TLS certificate provisioning via `cert-manager.io/cluster-issuer: letsencrypt-production`.
+
+### 5.2 GitHub Actions + ArgoCD GitOps Pipeline
+1. **Pull Request Gate (`test-and-coverage`):** Every PR runs all Go unit and integration tests and enforces $\ge 90\%$ statement coverage.
+2. **Release Build on Merge to `main` (`build-and-update-argocd`):**
+   * Builds and pushes `ghcr.io/pbures/3d3t-ai-ml-learning:sha-<short_sha>` and `:latest` to GitHub Container Registry (GHCR).
+   * Stamps `k8s/deployment.yaml` with the immutable `sha-<short_sha>` image tag and pushes the rendered manifests to the `deploy` branch.
+3. **ArgoCD Auto-Sync (`argocd/application.yaml`):**
+   * ArgoCD Application `3t3d-arena` in namespace `argocd` watches `https://github.com/pbures/3d3t-ai-ml-learning.git` (`targetRevision: deploy`, `path: k8s`) with `automated: {prune: true, selfHeal: true}`, rolling out every merged PR to `https://3t3d.buresovi.net` automatically.
+
+---
+
+## 6. Verification Commands & Measured Results
 
 ```bash
 # Run all unit and integration tests (Engine + gRPC + HTTPS) with coverage

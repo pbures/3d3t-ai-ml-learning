@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: 3t3d-arena-svc
+  namespace: 3t3d
+  labels:
+    app: 3t3d-arena
+spec:
+  type: ClusterIP
+  selector:
+    app: 3t3d-arena
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

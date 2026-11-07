@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: 3t3d-arena-ingress
+  namespace: 3t3d
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: 3t3d.buresovi.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: 3t3d-arena-svc
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - 3t3d.buresovi.net
+      secretName: 3t3d-tls-secret

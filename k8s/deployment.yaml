@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: 3t3d-arena
+  namespace: 3t3d
+  labels:
+    app: 3t3d-arena
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: 3t3d-arena
+  template:
+    metadata:
+      labels:
+        app: 3t3d-arena
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: arena-server
+          image: ghcr.io/pbures/3d3t-ai-ml-learning:latest
+          imagePullPolicy: Always
+          args:
+            - "-http-addr=:8080"
+            - "-grpc-endpoint=unix:///tmp/3t3d_train.sock"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

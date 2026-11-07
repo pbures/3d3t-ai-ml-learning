@@ -850,3 +850,32 @@ func StartTLSServer(addr string) (*ArenaServer, string, *http.Client, func(), er
 
 	return arena, baseURL, trustedClient, cleanup, nil
 }
+
+// StartHTTPServer starts a plain HTTP server on `addr` (e.g. ":8080") for deployment behind a
+// TLS-terminating Kubernetes Ingress controller (such as nginx-ingress with cert-manager).
+func StartHTTPServer(addr string) (*ArenaServer, string, func(), error) {
+	arena := NewArenaServer(nil)
+	rawLis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	httpSrv := &http.Server{
+		Handler:           arena.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		_ = httpSrv.Serve(rawLis)
+	}()
+
+	baseURL := "http://" + rawLis.Addr().String()
+	cleanup := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(ctx)
+		_ = rawLis.Close()
+	}
+
+	return arena, baseURL, cleanup, nil
+}
