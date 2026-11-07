@@ -22,7 +22,38 @@ Phase 3 is complete only when all of the following quantitative and functional c
 
 ---
 
-## 2. Technical Decisions & Alternatives Considered
+## 2. Tutor Discussion: Why Classical Agents & Tree Search Come Before the Neural Network
+
+Before training our PyTorch Neural Network in Phase 4, why do we implement four classical agents (`Random`, `Heuristic`, `AlphaBeta`, and `MCTS`) in `internal/agents`?
+
+### 2.1 The "Relative Progress Illusion" in Self-Play Reinforcement Learning
+When a Neural Network learns purely by playing against itself (Self-Play), a notorious failure mode is **intransitive cycling**: Model Generation 10 beats Generation 9, Generation 9 beats Generation 8... yet Generation 10 still blunders against a simple rule-based opponent because it overfitted to exploiting its own blind spots.
+Building a **4-Tier Calibration Ladder** gives us an objective, stationary ruler to measure our Neural Network's true skill progression during training:
+* **Tier 0 (`RandomAgent`):** Picks uniformly among legal columns.
+* **Tier 1 (`HeuristicAgent`):** Takes 1-ply wins, blocks opponent 1-ply wins, avoids **2-ply "poison columns"** (playing at height $z$ when doing so gives the opponent a winning landing spot at $z+1$), and prefers high-connectivity cells.
+* **Tier 2 (`AlphaBetaAgent`):** Searches $D$ plies ahead using **Negamax with Alpha-Beta Pruning** and a 76-line bitwise evaluation function.
+* **Tier 3 (`MCTSAgent`):** Builds an asymmetric search tree using **Monte Carlo Tree Search (UCT)**.
+
+### 2.2 A Geometric Invariant of $4 \times 4 \times 4$ 3T3D: The 16 "Power Cells"
+In `CellLineCounts`, we precompute how many of the **76 winning lines** pass through each of the 64 cells in the cube. Every cell in a $4 \times 4 \times 4$ cube falls into one of **two** exact symmetry classes:
+* **The 16 "Power Cells" (8 outer corners + 8 inner $2 \times 2 \times 2$ core cells):** Each participates in **7 winning lines** (3 orthogonal + 3 planar diagonals + 1 3D space diagonal).
+* **The 48 Edge/Face Cells:** Each participates in **4 winning lines** (3 orthogonal + 1 planar diagonal).
+
+$$\frac{16 \times 7 + 48 \times 4}{4 \text{ cells per line}} = \frac{112 + 192}{4} = \mathbf{76 \text{ winning lines}}$$
+
+In `AlphaBetaAgent`, sorting candidate moves so the 7-line Power Cells are searched first (`orderedValidActions`) causes Alpha-Beta pruning to cut off subtrees much earlier!
+
+### 2.3 Alpha-Beta (Minimax) vs. MCTS — And How MCTS Bridges to Phase 4
+
+| Dimension | Alpha-Beta Pruning (`alphabeta.go`) | Monte Carlo Tree Search (`mcts.go`) |
+| :--- | :--- | :--- |
+| **Search Tree Shape** | **Uniform depth** (explores all non-pruned branches to fixed depth $D$). | **Asymmetric depth** (concentrates simulations on promising branches via the UCT formula). |
+| **Leaf Evaluation** | Requires a hand-crafted domain heuristic `EvaluateBoard` (counting 1, 2, 3-in-a-row and gravity-reachable threats). | Evaluates leaves via statistical rollouts (or, in Phase 4, via our **Neural Network's Value Head**!). |
+| **Search Output** | A single best action $a^*$. | A full **probability distribution $\pi(a \mid s)$** over all 16 actions (`SearchWithPolicy`), which serves as the training target for our Neural Network's Policy Head! |
+
+---
+
+## 3. Technical Decisions & Alternatives Considered
 
 ### Decision 1: Four-Tier Agent Ladder (`Random`, `Heuristic`, `AlphaBeta`, `MCTS`)
 * **Why We Need All Four for Neural Network Training:**
@@ -45,16 +76,16 @@ $$V(s) = \max_{a \in \text{Valid}(s)} \left( -V(\text{Step}(s, a)) \right)$$
 
 ---
 
-## 3. Mathematical Formulation of Search & Evaluation
+## 4. Mathematical Formulation of Search & Evaluation
 
-### 3.1 Cell Centrality in a $4 \times 4 \times 4$ Cube
+### 4.1 Cell Centrality in a $4 \times 4 \times 4$ Cube
 Not all 64 cells in the 3D grid are equal! If we count how many of the **76 winning lines** pass through each coordinate $(x, y, z)$:
 * **16 Interior + Corner cells** (where $(x, y, z) \in \lbrace 0, 3 \rbrace^3$ or $\lbrace 1, 2 \rbrace^3$): Lie on **7 winning lines** each (3 orthogonal + 3 planar diagonals + 1 space diagonal).
 * **48 Edge/Face cells:** Lie on **4 winning lines** each (3 orthogonal + 1 planar diagonal).
 
 *(Notice that $\frac{16 \times 7 + 48 \times 4}{4} = \frac{112 + 192}{4} = \frac{304}{4} = 76$ lines!)*
 
-### 3.2 Bitboard Heuristic Evaluation Function $E(s, p)$
+### 4.2 Bitboard Heuristic Evaluation Function $E(s, p)$
 For non-terminal leaf nodes in Alpha-Beta search, we evaluate state $s$ for player $p$ by inspecting each of the 76 winning line masks $M_k$:
 * If **both** White and Black have bits inside $M_k$ (`(myBoard & M_k) != 0 && (oppBoard & M_k) != 0`), line $k$ is **blocked** (worth $0$ points to both players).
 * If only `myBoard` occupies $c \in \lbrace 1, 2, 3 \rbrace$ bits of $M_k$ (and `oppBoard` has $0$):
@@ -63,7 +94,7 @@ For non-terminal leaf nodes in Alpha-Beta search, we evaluate state $s$ for play
   * $c = 3 \implies +25$ points (or $+60$ if the 4th empty cell is immediately playable on the current gravity surface!)
 * Symmetrically, unblocked opponent lines subtract $-1, -5, -25$ (or $-80$ if immediately playable).
 
-### 3.3 Monte Carlo Tree Search (UCT Selection Formula)
+### 4.3 Monte Carlo Tree Search (UCT Selection Formula)
 At each tree node $s$, MCTS selects the child action $a$ that maximizes the Upper Confidence Bound for Trees:
 
 $$\text{UCT}(s, a) = \frac{W(s, a)}{N(s, a)} + c_{\text{puct}} \sqrt{\frac{\ln N(s)}{N(s, a)}}$$
@@ -76,7 +107,7 @@ where:
 
 ---
 
-## 4. Detailed Architecture & Package Layout
+## 5. Detailed Architecture & Package Layout
 
 ```text
 3d3t-ai-ml-learning/
@@ -99,7 +130,7 @@ where:
 
 ---
 
-## 5. Verification Commands & Measured Results
+## 6. Verification Commands & Measured Results
 
 ```bash
 # Run all unit and integration tests (Engine + Agents + gRPC + HTTPS) with coverage
