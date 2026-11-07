@@ -150,43 +150,65 @@ func ParseFusedWeights(data []byte) (*TTT3DModel, error) {
 	return m, nil
 }
 
+type conv3x3Tap struct {
+	inCell int
+	kOff   int
+}
+
+var conv3x3Taps [64][]conv3x3Tap
+
+func init() {
+	for z := 0; z < 4; z++ {
+		for y := 0; y < 4; y++ {
+			for x := 0; x < 4; x++ {
+				cell := 16*z + 4*y + x
+				taps := make([]conv3x3Tap, 0, 27)
+				for kz := 0; kz < 3; kz++ {
+					iz := z + kz - 1
+					if iz < 0 || iz >= 4 {
+						continue
+					}
+					for ky := 0; ky < 3; ky++ {
+						iy := y + ky - 1
+						if iy < 0 || iy >= 4 {
+							continue
+						}
+						for kx := 0; kx < 3; kx++ {
+							ix := x + kx - 1
+							if ix < 0 || ix >= 4 {
+								continue
+							}
+							taps = append(taps, conv3x3Tap{
+								inCell: 16*iz + 4*iy + ix,
+								kOff:   9*kz + 3*ky + kx,
+							})
+						}
+					}
+				}
+				conv3x3Taps[cell] = taps
+			}
+		}
+	}
+}
+
 func conv3d3x3Pad1(in []float32, inC, outC int, w, b []float32) []float32 {
 	out := make([]float32, outC*64)
 	for oc := 0; oc < outC; oc++ {
 		bias := b[oc]
 		ocBase := oc * 64
+		for cell := 0; cell < 64; cell++ {
+			out[ocBase+cell] = bias
+		}
 		wOcBase := oc * inC * 27
-		for z := 0; z < 4; z++ {
-			for y := 0; y < 4; y++ {
-				for x := 0; x < 4; x++ {
-					sum := bias
-					for ic := 0; ic < inC; ic++ {
-						inIcBase := ic * 64
-						wIcBase := wOcBase + ic*27
-						for kz := 0; kz < 3; kz++ {
-							iz := z + kz - 1
-							if iz < 0 || iz >= 4 {
-								continue
-							}
-							for ky := 0; ky < 3; ky++ {
-								iy := y + ky - 1
-								if iy < 0 || iy >= 4 {
-									continue
-								}
-								for kx := 0; kx < 3; kx++ {
-									ix := x + kx - 1
-									if ix < 0 || ix >= 4 {
-										continue
-									}
-									inIdx := inIcBase + 16*iz + 4*iy + ix
-									kIdx := wIcBase + 9*kz + 3*ky + kx
-									sum += in[inIdx] * w[kIdx]
-								}
-							}
-						}
-					}
-					out[ocBase+16*z+4*y+x] = sum
+		for ic := 0; ic < inC; ic++ {
+			inIcBase := ic * 64
+			wIcBase := wOcBase + ic*27
+			for cell := 0; cell < 64; cell++ {
+				sum := out[ocBase+cell]
+				for _, tap := range conv3x3Taps[cell] {
+					sum += in[inIcBase+tap.inCell] * w[wIcBase+tap.kOff]
 				}
+				out[ocBase+cell] = sum
 			}
 		}
 	}

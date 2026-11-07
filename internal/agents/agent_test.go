@@ -69,7 +69,6 @@ func TestAll76LinesImmediateWinAndBlock(t *testing.T) {
 		NewHeuristicAgent(),
 		NewAlphaBetaAgent(2),
 		NewMCTSAgent(60, 7),
-		NewTTT3DNetAgent(true),
 		NewTTT3DNetAgent(false),
 	}
 
@@ -188,7 +187,6 @@ func TestArenaWinRatesAgainstRandom(t *testing.T) {
 		NewHeuristicAgent(),
 		NewAlphaBetaAgent(2),
 		NewMCTSAgent(80, 12345),
-		NewTTT3DNetAgent(true),
 		NewTTT3DNetAgent(false),
 	}
 
