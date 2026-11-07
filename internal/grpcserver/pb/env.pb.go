@@ -132,6 +132,19 @@ type BatchStepResponse struct {
 	Dones                []bool   `json:"dones"`
 	Winners              []uint32 `json:"winners"`
 	ValidMasks           []uint32 `json:"valid_masks"`
-	CurrentPlayers       []uint32 `json:"current_players"`
-	WinLineMasks         []uint64 `json:"win_line_masks"`
+	CurrentPlayers       []uint32  `json:"current_players"`
+	WinLineMasks         []uint64  `json:"win_line_masks"`
+}
+
+type SelectActionRequest struct {
+	GameId      string `json:"game_id"`
+	Agent       string `json:"agent"`
+	Simulations uint32 `json:"simulations"`
+}
+
+type SelectActionResponse struct {
+	Action uint32    `json:"action"`
+	Agent  string    `json:"agent"`
+	Policy []float32 `json:"policy"`
+	Value  float32   `json:"value"`
 }

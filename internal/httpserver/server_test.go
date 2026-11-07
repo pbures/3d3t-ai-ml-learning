@@ -169,6 +169,78 @@ func TestUnitHandlerMethodsAndErrors(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on draw preset, got %d", rec.Code)
 	}
+
+	// 7. AI-Move & Built-in Bot Webhook validation
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/games/default/ai-move", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on GET /ai-move, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/games/default/ai-move", strings.NewReader(`{bad`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad JSON in /ai-move, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/games/missing/ai-move", strings.NewReader(`{"agent":"mcts"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on missing game in /ai-move, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/games/default/ai-move", strings.NewReader(`{"agent":"unknown"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unknown agent in /ai-move, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/games/preset-game/ai-move", strings.NewReader(`{"agent":"mcts"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on finished game in /ai-move, got %d", rec.Code)
+	}
+
+	// Bot webhook error paths
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/bots/mcts/move", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on GET /api/v1/bots/mcts/move, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/bots/mcts/invalid", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on invalid bot route, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/bots/mcts/move", strings.NewReader(`{bad`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad JSON in bot webhook, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/bots/unknown/move", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unknown agent in bot webhook, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/bots/mcts/move", strings.NewReader(`{"status_code":3}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on terminal state in bot webhook, got %d", rec.Code)
+	}
 }
 
 func TestUnitRunMatchErrorPaths(t *testing.T) {

@@ -226,6 +226,19 @@
     </div>
 
     <div class="card">
+      <h2>AI Agents (Phase 3)</h2>
+      <div class="row" style="margin-bottom:0;">
+        <select id="ai-agent-select">
+          <option value="mcts" selected>MCTS (UCT Tree Search)</option>
+          <option value="alphabeta">Alpha-Beta (Negamax)</option>
+          <option value="heuristic">Tactical Heuristic</option>
+          <option value="random">Random Agent</option>
+        </select>
+        <button id="btn-ai-move" class="primary">Step AI Move</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Drop Ball — Column (X, Y)</h2>
       <div id="column-pad" class="grid-pad"></div>
     </div>
@@ -552,6 +565,23 @@
     document.getElementById('btn-preset-diag3d').onclick = () => loadPreset({ type: 'win', line_index: 72, winner: 1 });
     document.getElementById('btn-preset-ortho').onclick = () => loadPreset({ type: 'win', line_index: 0, winner: 2 });
     document.getElementById('btn-preset-draw').onclick = () => loadPreset({ type: 'draw' });
+
+    document.getElementById('btn-ai-move').onclick = async () => {
+      if (!currentGame || currentGame.status !== 'ONGOING') return;
+      stopAutoPlay();
+      const agent = document.getElementById('ai-agent-select').value;
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/ai-move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        currentGame = data.state;
+        await refreshGameList(currentGame.game_id);
+        setReplayPly((currentGame.history || []).length);
+      }
+    };
 
     document.getElementById('btn-first').onclick = () => { stopAutoPlay(); setReplayPly(0); };
     document.getElementById('btn-prev').onclick = () => { stopAutoPlay(); setReplayPly(replayPly - 1); };

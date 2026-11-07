@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pbures/3d3t-ai-ml-learning/internal/agents"
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
 	"github.com/pbures/3d3t-ai-ml-learning/internal/grpcserver/pb"
 	"google.golang.org/grpc"
@@ -173,6 +174,73 @@ func (s *EnvServer) GetWinLines(_ context.Context, _ *pb.Empty) (*pb.WinLinesRes
 		}
 	}
 	return &pb.WinLinesResponse{Lines: lines}, nil
+}
+
+// SelectAction computes a move for the specified game using one of the built-in classical agents
+// ("random", "heuristic", "alphabeta", "mcts").
+func (s *EnvServer) SelectAction(_ context.Context, req *pb.SelectActionRequest) (*pb.SelectActionResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "nil SelectActionRequest")
+	}
+	gameID := resolveGameID(req.GameId)
+
+	s.mu.RLock()
+	g, exists := s.games[gameID]
+	if !exists {
+		s.mu.RUnlock()
+		return nil, status.Errorf(codes.NotFound, "game %q not found", gameID)
+	}
+	snapshot := g.Clone()
+	s.mu.RUnlock()
+
+	if snapshot.Status != engine.StatusOngoing {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", agents.ErrNoValidMoves)
+	}
+
+	agentName := strings.ToLower(strings.TrimSpace(req.Agent))
+	if agentName == "" {
+		agentName = "mcts"
+	}
+
+	if agentName == "mcts" {
+		sims := int(req.Simulations)
+		if sims <= 0 {
+			sims = 200
+		}
+		mcts := agents.NewMCTSAgent(sims, int64(snapshot.MoveCount)+1)
+		act, policyArr, val, err := mcts.SearchWithPolicy(snapshot)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "%v", err)
+		}
+		return &pb.SelectActionResponse{
+			Action: uint32(act),
+			Agent:  mcts.Name(),
+			Policy: policyArr[:],
+			Value:  val,
+		}, nil
+	}
+
+	ag, err := agents.NewAgentByName(agentName, int64(snapshot.MoveCount)+1)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	if ab, ok := ag.(*agents.AlphaBetaAgent); ok && req.Simulations > 0 && req.Simulations <= 6 {
+		ab.MaxDepth = int(req.Simulations)
+	}
+
+	act, err := ag.SelectAction(snapshot)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+
+	policy := make([]float32, engine.MaxActions)
+	policy[act] = 1.0
+	return &pb.SelectActionResponse{
+		Action: uint32(act),
+		Agent:  ag.Name(),
+		Policy: policy,
+		Value:  0.0,
+	}, nil
 }
 
 func (s *EnvServer) buildBatchStateLocked() *pb.BatchStateResponse {
