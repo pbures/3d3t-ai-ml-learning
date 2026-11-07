@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: 3t3d-arena
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/pbures/3d3t-ai-ml-learning.git
+    targetRevision: deploy
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: 3t3d
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -241,6 +241,25 @@ func TestUnitHandlerMethodsAndErrors(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 on terminal state in bot webhook, got %d", rec.Code)
 	}
+
+	// 8. StartHTTPServer lifecycle & invalid address test
+	_, httpURL, stopHTTP, err := StartHTTPServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("StartHTTPServer failed: %v", err)
+	}
+	resp, err := http.Get(httpURL + "/api/v1/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/api/v1/health failed: %v", httpURL, err)
+	}
+	_ = resp.Body.Close()
+	stopHTTP()
+
+	if _, _, _, err := StartHTTPServer("invalid-addr:999999"); err == nil {
+		t.Fatalf("expected error on invalid address in StartHTTPServer")
+	}
+	if _, _, _, _, err := StartTLSServer("invalid-addr:999999"); err == nil {
+		t.Fatalf("expected error on invalid address in StartTLSServer")
+	}
 }
 
 func TestUnitRunMatchErrorPaths(t *testing.T) {
