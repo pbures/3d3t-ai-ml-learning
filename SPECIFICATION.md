@@ -159,9 +159,9 @@ Integration tests (over both HTTPS and gRPC) must explicitly verify **all rules 
 
 | Phase | Focus Area | Key Concepts & Deliverables |
 | :--- | :--- | :--- |
-| **Phase 1** | **Project Specification** *(Completed)* | Rules definition, Bitboard math, Hybrid Go + Python architecture, gRPC vs. HTTPS separation, 90% coverage & integration test mandate. |
-| **Phase 2** | **Go Core Engine & Vectorized gRPC** | Implementing the 64-bit Bitboard engine, precomputing the 76 win masks, unit tests ($\ge 90\%$ coverage), vectorized gRPC server, and gRPC integration tests verifying all game rules. |
-| **Phase 3** | **HTTPS Battle Server & 3D Web Replay UI** | Building the Go HTTPS API, unit & HTTPS integration tests verifying all game rules, and the Three.js 3D Web UI with step-by-step replay controls. |
-| **Phase 4** | **Baseline Agents & Classical Search** | Building Random, Heuristic (1-ply win/block), and Minimax/MCTS agents with unit/integration tests to benchmark our Neural Network. |
-| **Phase 5** | **Neural Network Design & Training Pipeline** | Designing the 3D CNN in PyTorch, connecting to Go via vectorized gRPC, implementing Policy/Value loss, symmetry augmentation, training loop, and $\ge 90\%$ test coverage. |
-| **Phase 6** | **Remote AI Battle & Evaluation** | Wrapping the trained PyTorch model in an HTTPS Bot client/server, end-to-end battle integration tests, and watching its games step-by-step in the 3D Web UI. |
+| **Phase 0** | **Project Specification** *(Completed)* | `SPECIFICATION.md` — Rules definition, Bitboard math, Hybrid Go + Python architecture, gRPC vs. HTTPS separation, 90% coverage & integration test mandate. |
+| **Phase 1** | **Go Core Engine & Vectorized gRPC** | `IMPLEMENTATION-PHASE1.md` — Implementing the 64-bit Bitboard engine, precomputing the 76 win masks, unit tests ($\ge 90\%$ coverage), vectorized gRPC server, and gRPC integration tests verifying all game rules. |
+| **Phase 2** | **HTTPS Battle Server & 3D Web Replay UI** | `IMPLEMENTATION-PHASE2.md` — Building the Go HTTPS API, unit & HTTPS integration tests verifying all game rules, and the Three.js 3D Web UI with step-by-step replay controls. |
+| **Phase 3** | **Baseline Agents & Classical Search** | `IMPLEMENTATION-PHASE3.md` — Building Random, Heuristic (1-ply win/block), and Minimax/MCTS agents with unit/integration tests to benchmark our Neural Network. |
+| **Phase 4** | **Neural Network Design & Training Pipeline** | `IMPLEMENTATION-PHASE4.md` — Designing the 3D CNN in PyTorch, connecting to Go via vectorized gRPC, implementing Policy/Value loss, symmetry augmentation, training loop, and $\ge 90\%$ test coverage. |
+| **Phase 5** | **Remote AI Battle & Evaluation** | `IMPLEMENTATION-PHASE5.md` — Wrapping the trained PyTorch model in an HTTPS Bot client/server, end-to-end battle integration tests, and watching its games step-by-step in the 3D Web UI. |
