@@ -2,6 +2,7 @@ package agents
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
@@ -26,7 +27,7 @@ func TestCellLineCountsGeometry(t *testing.T) {
 }
 
 func TestAgentFactoryAndTerminalErrors(t *testing.T) {
-	for _, name := range []string{"random", "heuristic", "alphabeta", "minimax", "mcts"} {
+	for _, name := range []string{"random", "heuristic", "alphabeta", "minimax", "mcts", "ttt3dnet", "ttt3dnet-pure"} {
 		ag, err := NewAgentByName(name, 42)
 		if err != nil || ag == nil || ag.Name() == "" {
 			t.Fatalf("NewAgentByName(%q) failed: %v", name, err)
@@ -205,5 +206,120 @@ func TestArenaWinRatesAgainstRandom(t *testing.T) {
 			t.Fatalf("agent %s achieved only %.1f%% (%d/%d) win rate vs Random, expected >= 90%%",
 				challenger.Name(), winRate*100, wins, total)
 		}
+	}
+}
+
+func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
+	model, err := DefaultTTT3DModel()
+	if err != nil {
+		t.Fatalf("DefaultTTT3DModel failed: %v", err)
+	}
+	if model.Channels != 32 || model.NumBlocks != 2 {
+		t.Fatalf("expected Channels=32, NumBlocks=2, got %d, %d", model.Channels, model.NumBlocks)
+	}
+
+	// Verify exact parity with PyTorch reference forward pass on sample tensor
+	var input [3 * 64]float32
+	input[0*64+0] = 1.0 // obs[0, 0, 0, 0] = 1.0
+	input[1*64+5] = 1.0 // obs[1, 0, 1, 1] = 1.0
+	for i := 0; i < 16; i++ {
+		input[2*64+i] = 1.0 // gravity surface z=0
+	}
+	input[2*64+0] = 0.0
+	input[2*64+16+0] = 1.0
+	input[2*64+5] = 0.0
+	input[2*64+16+5] = 1.0
+
+	logits, val := model.Forward(input)
+	expectedLogits := [4]float32{-0.276223, -0.039831, -0.018901, -0.001789}
+	for i := 0; i < 4; i++ {
+		if math.Abs(float64(logits[i]-expectedLogits[i])) > 1e-4 {
+			t.Fatalf("logit[%d] mismatch: got %.6f, expected %.6f", i, logits[i], expectedLogits[i])
+		}
+	}
+	if math.Abs(float64(val-0.207285)) > 1e-4 {
+		t.Fatalf("value mismatch: got %.6f, expected 0.207285", val)
+	}
+
+	// Test ParseFusedWeights error branches
+	if _, err := ParseFusedWeights([]byte("short")); err == nil {
+		t.Fatal("expected error on short weight buffer")
+	}
+	if _, err := ParseFusedWeights([]byte("BADMAGIC12345678")); err == nil {
+		t.Fatal("expected error on bad magic header")
+	}
+	badVer := make([]byte, 20)
+	copy(badVer[:4], "3T3D")
+	badVer[4] = 99
+	if _, err := ParseFusedWeights(badVer); err == nil {
+		t.Fatal("expected error on unsupported version")
+	}
+	badDims := make([]byte, 20)
+	copy(badDims[:4], "3T3D")
+	badDims[4] = 1
+	if _, err := ParseFusedWeights(badDims); err == nil {
+		t.Fatal("expected error on zero dimensions")
+	}
+	truncated := make([]byte, 20)
+	copy(truncated[:4], "3T3D")
+	truncated[4] = 1
+	truncated[8] = 32
+	truncated[12] = 2
+	if _, err := ParseFusedWeights(truncated); err == nil {
+		t.Fatal("expected error on truncated payload")
+	}
+
+	// Test Pure vs Hybrid TTT3DNetAgent on immediate win, block, and ongoing board
+	hybrid := NewTTT3DNetAgent(true)
+	pure := NewTTT3DNetAgent(false)
+	if hybrid.Name() != "ttt3dnet" || pure.Name() != "ttt3dnet-pure" {
+		t.Fatalf("unexpected names: %s, %s", hybrid.Name(), pure.Name())
+	}
+
+	g := engine.NewGame()
+	actPure, probsPure, valPure, err := pure.SelectActionWithPolicy(g)
+	if err != nil || actPure >= 16 || valPure < -1.0 || valPure > 1.0 {
+		t.Fatalf("pure SelectActionWithPolicy failed: act=%d val=%f err=%v", actPure, valPure, err)
+	}
+	var sumP float32
+	for _, p := range probsPure {
+		sumP += p
+	}
+	if math.Abs(float64(sumP-1.0)) > 1e-4 {
+		t.Fatalf("expected probabilities to sum to 1.0, got %f", sumP)
+	}
+
+	// Immediate win on action 3
+	gWin := engine.NewGame()
+	for _, m := range []uint8{0, 4, 1, 5, 2, 6} {
+		_, _ = gWin.ApplyMove(m)
+	}
+	if act, err := hybrid.SelectAction(gWin); err != nil || act != 3 {
+		t.Fatalf("expected hybrid to take winning move 3, got %d (err=%v)", act, err)
+	}
+
+	// Immediate block on action 3
+	gBlock := engine.NewGame()
+	for _, m := range []uint8{0, 4, 1, 5, 2} {
+		_, _ = gBlock.ApplyMove(m)
+	}
+	if act, err := hybrid.SelectAction(gBlock); err != nil || act != 3 {
+		t.Fatalf("expected hybrid to block on move 3, got %d (err=%v)", act, err)
+	}
+
+	// Ongoing normal move selection via hybrid lookahead
+	gMid := engine.NewGame()
+	_, _ = gMid.ApplyMove(5)
+	if act, err := hybrid.SelectAction(gMid); err != nil || act >= 16 {
+		t.Fatalf("hybrid failed on mid-game state: act=%d err=%v", act, err)
+	}
+
+	// Terminal state returns ErrNoValidMoves
+	gDone := engine.NewGame()
+	for _, a := range engine.GenerateDrawSequence() {
+		_, _ = gDone.ApplyMove(a)
+	}
+	if _, err := hybrid.SelectAction(gDone); !errors.Is(err, ErrNoValidMoves) {
+		t.Fatalf("expected ErrNoValidMoves on finished game, got %v", err)
 	}
 }

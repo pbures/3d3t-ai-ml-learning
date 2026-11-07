@@ -230,6 +230,18 @@ func (s *EnvServer) SelectAction(_ context.Context, req *pb.SelectActionRequest)
 	if ab, ok := ag.(*agents.AlphaBetaAgent); ok && req.Simulations > 0 && req.Simulations <= 6 {
 		ab.MaxDepth = int(req.Simulations)
 	}
+	if nn, ok := ag.(*agents.TTT3DNetAgent); ok {
+		act, policyArr, val, err := nn.SelectActionWithPolicy(snapshot)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "%v", err)
+		}
+		return &pb.SelectActionResponse{
+			Action: uint32(act),
+			Agent:  nn.Name(),
+			Policy: policyArr[:],
+			Value:  val,
+		}, nil
+	}
 
 	act, err := ag.SelectAction(snapshot)
 	if err != nil {

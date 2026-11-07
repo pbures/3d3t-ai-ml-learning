@@ -111,6 +111,12 @@ func TestEnvServerUnitErrorPaths(t *testing.T) {
 	if _, err := srv.SelectAction(ctx, &pb.SelectActionRequest{GameId: DefaultGameID, Agent: "bad-agent"}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("expected InvalidArgument on SelectAction for unknown agent, got %v", err)
 	}
+	for _, nnName := range []string{"ttt3dnet", "ttt3dnet-pure"} {
+		resp, err := srv.SelectAction(ctx, &pb.SelectActionRequest{GameId: DefaultGameID, Agent: nnName})
+		if err != nil || resp.Agent != nnName || len(resp.Policy) != 16 {
+			t.Fatalf("SelectAction(%q) failed: resp=%v err=%v", nnName, resp, err)
+		}
+	}
 }
 
 func TestUnimplementedServerAndCodec(t *testing.T) {

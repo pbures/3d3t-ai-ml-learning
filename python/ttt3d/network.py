@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -242,3 +243,49 @@ class TTT3DNet(nn.Module):
         model.load_state_dict(payload["state_dict"])
         model.to(map_location)
         return model
+
+    @torch.no_grad()
+    def export_fused_binary(self, path: Union[str, Path]) -> None:
+        """Exports BatchNorm-fused float32 weights into a compact binary file for Go inference."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        def fuse_conv_bn(conv: nn.Conv3d, bn: nn.BatchNorm3d) -> Tuple[np.ndarray, np.ndarray]:
+            w = conv.weight.detach().cpu().float()
+            gamma = bn.weight.detach().cpu().float()
+            beta = bn.bias.detach().cpu().float()
+            mean = bn.running_mean.detach().cpu().float()
+            var = bn.running_var.detach().cpu().float()
+            scale = gamma / torch.sqrt(var + bn.eps)
+            w_fused = (w * scale.view(-1, 1, 1, 1, 1)).numpy().astype("<f4")
+            b_fused = (beta - mean * scale).numpy().astype("<f4")
+            return w_fused, b_fused
+
+        chunks = [struct.pack("<4sIII", b"3T3D", 1, int(self.channels), int(self.num_blocks))]
+
+        def add_pair(w: np.ndarray, b: np.ndarray) -> None:
+            chunks.append(np.ascontiguousarray(w, dtype="<f4").tobytes())
+            chunks.append(np.ascontiguousarray(b, dtype="<f4").tobytes())
+
+        add_pair(*fuse_conv_bn(self.stem_conv, self.stem_bn))
+        for block in self.res_blocks:
+            add_pair(*fuse_conv_bn(block.conv1, block.bn1))
+            add_pair(*fuse_conv_bn(block.conv2, block.bn2))
+
+        add_pair(*fuse_conv_bn(self.policy_conv, self.policy_bn))
+        add_pair(
+            self.policy_fc.weight.detach().cpu().numpy().astype("<f4"),
+            self.policy_fc.bias.detach().cpu().numpy().astype("<f4"),
+        )
+
+        add_pair(*fuse_conv_bn(self.value_conv, self.value_bn))
+        add_pair(
+            self.value_fc1.weight.detach().cpu().numpy().astype("<f4"),
+            self.value_fc1.bias.detach().cpu().numpy().astype("<f4"),
+        )
+        add_pair(
+            self.value_fc2.weight.detach().cpu().numpy().astype("<f4"),
+            self.value_fc2.bias.detach().cpu().numpy().astype("<f4"),
+        )
+
+        target.write_bytes(b"".join(chunks))
