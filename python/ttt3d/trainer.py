@@ -10,23 +10,152 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .arena_bot import NeuralArenaBot
+from .arena_bot import (
+    WIN_LINE_MASKS,
+    NeuralArenaBot,
+    _build_canonical_from_bitboards,
+    check_bitboard_win,
+    find_immediate_wins,
+    landing_bit_for_action,
+)
 from .grpc_client import VectorizedEnvClient
-from .network import NUM_ACTIONS, TTT3DNet
+from .network import NUM_ACTIONS, TTT3DNet, valid_mask_to_tensor
 from .symmetry import NUM_SYMMETRIES, transform_policy, transform_state, transform_valid_mask
 
 PLAYER_WHITE = 1
 PLAYER_BLACK = 2
 
+_POW2_64: Tuple[int, ...] = tuple(1 << i for i in range(64))
+
+
+def _canonical_tensor_to_bitboards(state: np.ndarray) -> Tuple[int, int]:
+    """Extracts 64-bit (my_bb, opp_bb) integer bitboards from a (3, 4, 4, 4) canonical tensor."""
+    flat = state.reshape(3, 64)
+    my_plane = flat[0]
+    opp_plane = flat[1]
+    my_bb = 0
+    opp_bb = 0
+    for bit in range(64):
+        if my_plane[bit] > 0.5:
+            my_bb |= _POW2_64[bit]
+        if opp_plane[bit] > 0.5:
+            opp_bb |= _POW2_64[bit]
+    return my_bb, opp_bb
+
+
+def compute_tactical_action_masks(
+    state: np.ndarray, valid_mask: int
+) -> Tuple[int, int, bool]:
+    """Computes 1-ply tactical action bitmasks for canonical `state` (3, 4, 4, 4).
+
+    Returns:
+      - win_mask: 16-bit mask of legal actions that immediately win on this ply
+      - blunder_mask: 16-bit mask of legal actions that either:
+          (a) fail to play an immediate winning move when `win_mask != 0`, OR
+          (b) hand the opponent an immediate 1-ply winning move on the next ply
+              (missing a forced block or playing a poison column) when at least
+              one safe continuation exists
+      - forced_loss: True if `win_mask == 0` and EVERY legal action allows an
+        immediate 1-ply opponent win (unstoppable opponent fork)
+    """
+    valid_mask = int(valid_mask) & 0xFFFF
+    if valid_mask == 0:
+        return 0, 0, False
+
+    my_bb, opp_bb = _canonical_tensor_to_bitboards(state)
+    occupied = my_bb | opp_bb
+
+    # 1. Check immediate 1-ply winning moves for active player
+    win_mask = 0
+    for a in range(NUM_ACTIONS):
+        if (valid_mask & (1 << a)) == 0:
+            continue
+        lbit = landing_bit_for_action(occupied, a)
+        if lbit is not None and check_bitboard_win(my_bb | (1 << lbit)):
+            win_mask |= 1 << a
+
+    if win_mask != 0:
+        blunder_mask = valid_mask & (~win_mask)
+        return win_mask, blunder_mask, False
+
+    # 2. Check which legal actions leave the opponent with an immediate 1-ply win
+    lose_mask = 0
+    for a in range(NUM_ACTIONS):
+        if (valid_mask & (1 << a)) == 0:
+            continue
+        lbit = landing_bit_for_action(occupied, a)
+        if lbit is None:
+            continue
+        next_occ = occupied | (1 << lbit)
+        if len(find_immediate_wins(opp_bb, next_occ)) > 0:
+            lose_mask |= 1 << a
+
+    safe_mask = valid_mask & (~lose_mask)
+    if lose_mask != 0 and safe_mask != 0:
+        return 0, lose_mask, False
+    if lose_mask != 0 and safe_mask == 0:
+        return 0, 0, True
+    return 0, 0, False
+
+
+def rectify_tactical_sample(
+    state: np.ndarray,
+    policy: np.ndarray,
+    value: float,
+    valid_mask: int,
+) -> Tuple[np.ndarray, float, int]:
+    """Suppresses 1-ply losing moves in `policy` and clamps 1-ply terminal `value` targets."""
+    p_rect = np.array(policy, dtype=np.float32, copy=True)
+    v_rect = float(value)
+    valid_mask = int(valid_mask) & 0xFFFF
+
+    win_mask, blunder_mask, forced_loss = compute_tactical_action_masks(state, valid_mask)
+    if win_mask != 0:
+        # Active player can win in 1 move: concentrate 100% policy on winning moves
+        for a in range(NUM_ACTIONS):
+            if (win_mask & (1 << a)) == 0:
+                p_rect[a] = 0.0
+        total = float(p_rect.sum())
+        if total > 1e-8:
+            p_rect /= total
+        else:
+            win_actions = [a for a in range(NUM_ACTIONS) if (win_mask & (1 << a)) != 0]
+            for a in win_actions:
+                p_rect[a] = 1.0 / len(win_actions)
+        v_rect = 1.0
+        return p_rect, v_rect, blunder_mask
+
+    if forced_loss:
+        # Opponent has an unstoppable 1-ply double threat
+        v_rect = -1.0
+        return p_rect, v_rect, 0
+
+    if blunder_mask != 0:
+        # Suppress all 1-ply losing moves (missed blocks & poison columns) to 0 probability
+        safe_mask = valid_mask & (~blunder_mask)
+        for a in range(NUM_ACTIONS):
+            if (safe_mask & (1 << a)) == 0:
+                p_rect[a] = 0.0
+        total = float(p_rect.sum())
+        if total > 1e-8:
+            p_rect /= total
+        else:
+            safe_actions = [a for a in range(NUM_ACTIONS) if (safe_mask & (1 << a)) != 0]
+            for a in safe_actions:
+                p_rect[a] = 1.0 / len(safe_actions)
+
+    return p_rect, v_rect, blunder_mask
+
 
 @dataclass
 class TrainingSample:
-    """Single canonical (state, policy, value, valid_mask) training example."""
+    """Single canonical (state, policy, value, valid_mask, blunder_mask) training example."""
 
     state: np.ndarray       # shape (3, 4, 4, 4) float32
     policy: np.ndarray      # shape (16,) float32 probability distribution
     value: float            # scalar in [-1.0, +1.0] from active player's perspective
     valid_mask: int = 0xFFFF
+    blunder_mask: int = 0
 
 
 class ReplayBuffer:
@@ -48,15 +177,20 @@ class ReplayBuffer:
         value: float,
         valid_mask: int = 0xFFFF,
         augment: bool = True,
+        rectify_tactical: bool = True,
     ) -> int:
         """Adds a sample (or all 8 D4 symmetric transforms if augment=True) to the buffer."""
         s_arr = np.ascontiguousarray(state, dtype=np.float32)
         p_arr = np.ascontiguousarray(policy, dtype=np.float32)
         val = float(value)
-        mask = int(valid_mask)
+        mask = int(valid_mask) & 0xFFFF
+        blunder_mask = 0
+
+        if rectify_tactical:
+            p_arr, val, blunder_mask = rectify_tactical_sample(s_arr, p_arr, val, mask)
 
         if not augment:
-            self._buffer.append(TrainingSample(s_arr, p_arr, val, mask))
+            self._buffer.append(TrainingSample(s_arr, p_arr, val, mask, blunder_mask))
             return 1
 
         for sym_idx in range(NUM_SYMMETRIES):
@@ -66,6 +200,7 @@ class ReplayBuffer:
                     policy=transform_policy(p_arr, sym_idx),
                     value=val,
                     valid_mask=transform_valid_mask(mask, sym_idx),
+                    blunder_mask=transform_valid_mask(blunder_mask, sym_idx),
                 )
             )
         return NUM_SYMMETRIES
@@ -77,6 +212,18 @@ class ReplayBuffer:
         device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Samples a mini-batch of (states, target_policies, target_values, valid_masks)."""
+        s_t, p_t, v_t, m_t, _ = self.sample_batch_with_blunders(
+            batch_size=batch_size, rng=rng, device=device
+        )
+        return s_t, p_t, v_t, m_t
+
+    def sample_batch_with_blunders(
+        self,
+        batch_size: int,
+        rng: Optional[np.random.Generator] = None,
+        device: Optional[torch.device] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Samples (states, target_policies, target_values, valid_masks, blunder_masks)."""
         if len(self._buffer) == 0:
             raise ValueError("Cannot sample from an empty ReplayBuffer")
         generator = rng if rng is not None else np.random.default_rng()
@@ -87,18 +234,21 @@ class ReplayBuffer:
         policies = np.stack([self._buffer[i].policy for i in indices], axis=0)
         values = np.array([self._buffer[i].value for i in indices], dtype=np.float32)
         masks = np.array([self._buffer[i].valid_mask for i in indices], dtype=np.int64)
+        blunders = np.array([self._buffer[i].blunder_mask for i in indices], dtype=np.int64)
 
         s_t = torch.from_numpy(states)
         p_t = torch.from_numpy(policies)
         v_t = torch.from_numpy(values)
         m_t = torch.from_numpy(masks)
+        b_t = torch.from_numpy(blunders)
 
         if device is not None:
             s_t = s_t.to(device)
             p_t = p_t.to(device)
             v_t = v_t.to(device)
             m_t = m_t.to(device)
-        return s_t, p_t, v_t, m_t
+            b_t = b_t.to(device)
+        return s_t, p_t, v_t, m_t, b_t
 
 
 def compute_policy_value_loss(
@@ -107,11 +257,43 @@ def compute_policy_value_loss(
     target_policies: torch.Tensor,
     target_values: torch.Tensor,
     valid_masks: Optional[torch.Tensor] = None,
+    blunder_masks: Optional[torch.Tensor] = None,
+    blunder_weight: float = 4.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Computes combined AlphaZero-style Policy Cross-Entropy + Value MSE loss."""
+    """Computes AlphaZero Policy Cross-Entropy + 1-Ply Blunder Suppression + Value MSE loss."""
     logits, pred_values = model(states, valid_masks=valid_masks)
     log_probs = F.log_softmax(logits, dim=-1)
-    policy_loss = -(target_policies * log_probs).sum(dim=-1).mean()
+    probs = F.softmax(logits, dim=-1)
+
+    policy_ce_loss = -(target_policies * log_probs).sum(dim=-1).mean()
+    blunder_loss = torch.zeros((), dtype=logits.dtype, device=logits.device)
+
+    if blunder_masks is not None and blunder_weight > 0.0:
+        blunder_bool = valid_mask_to_tensor(blunder_masks).to(logits.device)
+        if valid_masks is not None:
+            legal_bool = valid_mask_to_tensor(valid_masks).to(logits.device)
+        else:
+            legal_bool = torch.ones_like(blunder_bool)
+        safe_bool = legal_bool & (~blunder_bool)
+        has_tactical = blunder_bool.any(dim=-1) & safe_bool.any(dim=-1)
+
+        if bool(has_tactical.any()):
+            # 1. Unlikelihood penalty on probability mass assigned to 1-ply losing moves
+            blunder_prob_mass = (probs * blunder_bool.float()).sum(dim=-1)
+            unlikelihood = -torch.log((1.0 - blunder_prob_mass).clamp(min=1e-6))
+
+            # 2. Symmetric logit margin penalty: pull target safe logit UP and push 1-ply blunder logits DOWN
+            target_safe_logit = (logits * target_policies).sum(dim=-1, keepdim=True)
+            margin_violation = F.relu(logits - target_safe_logit + 2.5) * blunder_bool.float()
+            blunder_count = blunder_bool.float().sum(dim=-1).clamp(min=1.0)
+            margin_loss = (margin_violation.pow(2).sum(dim=-1)) / blunder_count
+
+            tactical_mask_f = has_tactical.float()
+            blunder_loss = (
+                (unlikelihood + 0.35 * margin_loss) * tactical_mask_f
+            ).sum() / tactical_mask_f.sum().clamp(min=1.0)
+
+    policy_loss = policy_ce_loss + blunder_weight * blunder_loss
     value_loss = F.mse_loss(pred_values.squeeze(-1), target_values.reshape(-1))
     total_loss = policy_loss + value_loss
     return total_loss, policy_loss, value_loss
@@ -125,6 +307,7 @@ def train_epoch(
     steps_per_epoch: int = 20,
     device: Optional[torch.device] = None,
     max_grad_norm: float = 1.0,
+    blunder_weight: float = 4.0,
     rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, float]:
     """Runs `steps_per_epoch` mini-batch gradient updates on `model` from `buffer`."""
@@ -138,12 +321,18 @@ def train_epoch(
     value_losses: List[float] = []
 
     for _ in range(steps_per_epoch):
-        states, target_pi, target_v, masks = buffer.sample_batch(
+        states, target_pi, target_v, masks, blunders = buffer.sample_batch_with_blunders(
             batch_size=batch_size, rng=rng, device=dev
         )
         optimizer.zero_grad()
         loss, p_loss, v_loss = compute_policy_value_loss(
-            model, states, target_pi, target_v, valid_masks=masks
+            model,
+            states,
+            target_pi,
+            target_v,
+            valid_masks=masks,
+            blunder_masks=blunders,
+            blunder_weight=blunder_weight,
         )
         loss.backward()
         if max_grad_norm > 0:
@@ -187,7 +376,7 @@ def generate_self_play_episodes(
     for ep in range(num_episodes):
         game_id = f"selfplay_{ep}"
         state = client.reset(game_id=game_id)
-        trajectory: List[Tuple[np.ndarray, np.ndarray, int, int, float]] = []
+        trajectory: List[Tuple[np.ndarray, np.ndarray, int, int, float, int]] = []
 
         done = False
         while not done:
@@ -201,9 +390,13 @@ def generate_self_play_episodes(
                 )
                 target_pi = mcts_res["policy"]
                 mcts_val = float(mcts_res["value"])
-                # Sample from MCTS visit distribution when temperature > 0
+                # Mix MCTS teacher moves with model's own on-policy moves (DAgger exploration)
                 legal = [a for a in range(NUM_ACTIONS) if (valid_mask & (1 << a)) != 0]
-                if temperature <= 1e-6:
+                if temperature > 1e-6 and float(generator.random()) < 0.35:
+                    action, _, _ = model.select_action(
+                        obs, valid_mask=valid_mask, temperature=temperature, rng=generator
+                    )
+                elif temperature <= 1e-6:
                     action = int(mcts_res["action"])
                 else:
                     probs = np.array([max(float(target_pi[a]), 1e-8) for a in legal], dtype=np.float64)
@@ -214,7 +407,7 @@ def generate_self_play_episodes(
                     obs, valid_mask=valid_mask, temperature=temperature, rng=generator
                 )
 
-            trajectory.append((obs, target_pi, current_player, valid_mask, mcts_val))
+            trajectory.append((obs, target_pi, current_player, valid_mask, mcts_val, int(action)))
             step_res = client.step(action=action, game_id=game_id)
             state = step_res["state"]
             done = step_res["done"]
@@ -227,7 +420,7 @@ def generate_self_play_episodes(
         else:
             draws += 1
 
-        for obs, target_pi, player_at_step, mask_at_step, search_val in trajectory:
+        for obs, target_pi, player_at_step, mask_at_step, search_val, act_taken in trajectory:
             if winner == 0:
                 outcome_z = 0.0
             elif winner == player_at_step:
@@ -235,7 +428,13 @@ def generate_self_play_episodes(
             else:
                 outcome_z = -1.0
 
-            blended_value = 0.5 * outcome_z + 0.5 * search_val if use_go_mcts_teacher else outcome_z
+            _, step_blunder_mask, _ = compute_tactical_action_masks(obs, mask_at_step)
+            if (step_blunder_mask & (1 << act_taken)) != 0:
+                # Direct 1-ply blunder penalty if the executed move missed an immediate threat
+                blended_value = -1.0
+            else:
+                blended_value = 0.5 * outcome_z + 0.5 * search_val if use_go_mcts_teacher else outcome_z
+
             samples_added += buffer.add_sample(
                 state=obs,
                 policy=target_pi,
@@ -251,6 +450,75 @@ def generate_self_play_episodes(
         "black_wins": black_wins,
         "draws": draws,
     }
+
+
+def generate_tactical_threat_curriculum(
+    buffer: ReplayBuffer,
+    num_games: int = 64,
+    augment: bool = True,
+    rng: Optional[np.random.Generator] = None,
+) -> int:
+    """Mines 1-ply win, 1-ply forced-block, and poison-column states across all 76 winning lines."""
+    generator = rng if rng is not None else np.random.default_rng()
+    samples_added = 0
+
+    for _ in range(num_games):
+        white_bb = 0
+        black_bb = 0
+        current_player = PLAYER_WHITE
+
+        for _ in range(64):
+            occupied = white_bb | black_bb
+            my_bb = white_bb if current_player == PLAYER_WHITE else black_bb
+            opp_bb = black_bb if current_player == PLAYER_WHITE else white_bb
+            obs, valid_mask = _build_canonical_from_bitboards(my_bb, opp_bb)
+            if valid_mask == 0:
+                break
+
+            win_mask, blunder_mask, forced_loss = compute_tactical_action_masks(obs, valid_mask)
+            if win_mask != 0 or blunder_mask != 0 or forced_loss:
+                uniform_pi = np.zeros(NUM_ACTIONS, dtype=np.float32)
+                for a in range(NUM_ACTIONS):
+                    if (valid_mask & (1 << a)) != 0:
+                        uniform_pi[a] = 1.0
+                uniform_pi /= max(float(uniform_pi.sum()), 1.0)
+                val_target = 1.0 if win_mask != 0 else (-1.0 if forced_loss else 0.0)
+                samples_added += buffer.add_sample(
+                    state=obs,
+                    policy=uniform_pi,
+                    value=val_target,
+                    valid_mask=valid_mask,
+                    augment=augment,
+                    rectify_tactical=True,
+                )
+
+            legal = [a for a in range(NUM_ACTIONS) if (valid_mask & (1 << a)) != 0]
+            # Play a safe or tactical move 50% of the time so games reach deep multi-threat states,
+            # and a random move 50% of the time so opponent 3-in-a-row threats are left unblocked.
+            safe_actions = [a for a in legal if (blunder_mask & (1 << a)) == 0]
+            if win_mask != 0 and float(generator.random()) < 0.5:
+                win_actions = [a for a in legal if (win_mask & (1 << a)) != 0]
+                act = int(generator.choice(win_actions))
+            elif len(safe_actions) > 0 and float(generator.random()) < 0.65:
+                act = int(generator.choice(safe_actions))
+            else:
+                act = int(generator.choice(legal))
+
+            lbit = landing_bit_for_action(occupied, act)
+            if lbit is None:
+                break
+            if current_player == PLAYER_WHITE:
+                white_bb |= 1 << lbit
+                if check_bitboard_win(white_bb):
+                    break
+                current_player = PLAYER_BLACK
+            else:
+                black_bb |= 1 << lbit
+                if check_bitboard_win(black_bb):
+                    break
+                current_player = PLAYER_WHITE
+
+    return samples_added
 
 
 def generate_vectorized_rollouts(
@@ -270,8 +538,8 @@ def generate_vectorized_rollouts(
     valid_masks = pool_state["valid_masks"]
     current_players = pool_state["current_players"]
 
-    # Per-environment active episode trajectory: list of (obs, probs, player, valid_mask)
-    active_trajectories: List[List[Tuple[np.ndarray, np.ndarray, int, int]]] = [
+    # Per-environment active episode trajectory: list of (obs, probs, player, valid_mask, action)
+    active_trajectories: List[List[Tuple[np.ndarray, np.ndarray, int, int, int]]] = [
         [] for _ in range(num_envs)
     ]
     episodes_completed = 0
@@ -288,7 +556,7 @@ def generate_vectorized_rollouts(
             )
             actions[i] = act
             active_trajectories[i].append(
-                (obs_batch[i], probs, int(current_players[i]), int(valid_masks[i]))
+                (obs_batch[i], probs, int(current_players[i]), int(valid_masks[i]), int(act))
             )
 
         step_out = client.batch_step(actions)
@@ -299,8 +567,12 @@ def generate_vectorized_rollouts(
             if dones[i]:
                 episodes_completed += 1
                 winner = int(winners[i])
-                for s_obs, s_pi, s_player, s_mask in active_trajectories[i]:
-                    if winner == 0:
+                for s_obs, s_pi, s_player, s_mask, s_act in active_trajectories[i]:
+                    _, step_blunder_mask, _ = compute_tactical_action_masks(s_obs, s_mask)
+                    if (step_blunder_mask & (1 << s_act)) != 0:
+                        # Heavily penalize any step that chose a 1-ply losing move
+                        z = -1.0
+                    elif winner == 0:
                         z = 0.0
                     elif winner == s_player:
                         z = 1.0

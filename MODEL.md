@@ -66,14 +66,15 @@ Each baseline opponent was evaluated over **20 paired games** (10 games with `TT
 
 | Baseline Opponent | Opponent Description | Hybrid `NeuralArenaBot` (`W - D - L`) | Hybrid Win Rate | Pure Unshielded `TTT3DNet` (`W - D - L`) | Pure NN Win Rate |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **`random`** | Uniform random over legal columns | **`20 - 0 - 0`** | **`100.0%`** | `13 - 0 - 7` | `65.0%` |
+| **`random`** | Uniform random over legal columns | **`20 - 0 - 0`** | **`100.0%`** | **`20 - 0 - 0`** | **`100.0%`** |
 | **`heuristic`** | 1-ply win/block + poison filter + 76-line heuristic | **`20 - 0 - 0`** | **`100.0%`** | `0 - 0 - 20` | `0.0%` |
 | **`alphabeta`** | Depth-3 Negamax with $\alpha$-$\beta$ pruning & move ordering | **`20 - 0 - 0`** | **`100.0%`** | `0 - 0 - 20` | `0.0%` |
 | **`mcts`** | 200 UCT simulations/move with tactical rollout policy | **`3 - 2 - 15`** | **`20.0%`** | `0 - 0 - 20` | `0.0%` |
 
-### Why Hybrid `NeuralArenaBot` Outperforms Both Pure NN and Classical Heuristics:
-- Against **`random`**, even the raw unshielded neural network (`Pure NN`, single 1.17 ms forward pass) wins **65.0%** of games after just 10 iterations (80 self-play episodes).
-- Against **`heuristic`** and **`alphabeta` (depth 3)**, the hybrid `NeuralArenaBot` achieves a **100.0% (`20 - 0 - 0`) sweep** (winning all 10 games as White and all 10 games as Black) by combining `TTT3DNet`'s learned 3D positional evaluation with 2-ply bitboard fork prevention.
+### 1-Ply Blunder Suppression RL & Pure vs. Hybrid Analysis:
+- **1-Ply Threat Suppression Loss (`compute_policy_value_loss`):** During RL training, every state $(s_t, \boldsymbol{\pi}_t, z_t)$ is analyzed by `compute_tactical_action_masks` and `rectify_tactical_sample` to identify all 1-ply losing moves $\mathcal{A}_{\text{blunder}}(s_t)$ (moves that miss an immediate 4-in-a-row win, fail to block an opponent's 3-in-a-row threat, or drop into a poison column). The training objective adds an unlikelihood penalty $-\log(1 - \sum_{a \in \mathcal{A}_{\text{blunder}}} p_\theta(a \mid s_t))$ plus a symmetric logit-margin hinge penalty $\operatorname{ReLU}(\ell_\theta(a) - \ell_{\text{safe}}(s_t) + 2.5)^2$, and immediately assigns $z_t = -1.0$ to any rollout step that commits a 1-ply blunder.
+- Against **`random`**, this 1-ply threat suppression loss drives the **Pure Unshielded `TTT3DNet` (`ttt3dnet-pure`, single `1.17 ms` forward pass with zero search)** to a **`100.0%` (`20 - 0 - 0`) win rate**.
+- Against **`heuristic`** and **`alphabeta` (depth 3)**, the hybrid `NeuralArenaBot` (`ttt3dnet`) achieves a **100.0% (`20 - 0 - 0`) sweep** (winning all 10 games as White and all 10 games as Black) by combining `TTT3DNet`'s learned 3D positional evaluation with 2-ply bitboard fork prevention.
 - Against **`mcts` (200 simulations/move)**, `NeuralArenaBot` achieves a **20.0% score (`3 wins, 2 draws, 15 losses`)** while using only a 1-ply neural value lookahead compared to MCTS's 200 full-game tree rollouts.
 
 ---

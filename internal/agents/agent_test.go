@@ -231,14 +231,14 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 	input[2*64+16+5] = 1.0
 
 	logits, val := model.Forward(input)
-	expectedLogits := [4]float32{-0.276223, -0.039831, -0.018901, -0.001789}
+	expectedLogits := [4]float32{-1.337237, -0.699667, -0.742018, -1.611196}
 	for i := 0; i < 4; i++ {
 		if math.Abs(float64(logits[i]-expectedLogits[i])) > 1e-4 {
 			t.Fatalf("logit[%d] mismatch: got %.6f, expected %.6f", i, logits[i], expectedLogits[i])
 		}
 	}
-	if math.Abs(float64(val-0.207285)) > 1e-4 {
-		t.Fatalf("value mismatch: got %.6f, expected 0.207285", val)
+	if math.Abs(float64(val-0.269795)) > 1e-4 {
+		t.Fatalf("value mismatch: got %.6f, expected 0.269795", val)
 	}
 
 	// Test ParseFusedWeights error branches
