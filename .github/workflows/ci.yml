@@ -2,7 +2,7 @@ name: CI/CD — Tests, 90% Coverage Gate & ArgoCD GitOps Release
 
 on:
   push:
-    branches: [ main, phase-2b-k8s-argocd-deploy ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
