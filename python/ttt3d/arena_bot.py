@@ -521,12 +521,12 @@ class ArenaBattleClient:
         opponent_agent: str = "heuristic",
         game_id: str = "",
         bot_plays_white: bool = True,
-        bot_name: str = "PyTorch 3D-ResNet",
+        bot_name: str = "TTT3DNet",
     ) -> Dict[str, Any]:
         """Plays a full turn-by-turn match against a server-side agent over HTTPS."""
         opp_label = f"Go {opponent_agent.capitalize()}"
-        w_name = bot_name if bot_plays_white else opp_label
-        b_name = opp_label if bot_plays_white else bot_name
+        w_name = f"{bot_name} (White)" if bot_plays_white else f"{opp_label} (White)"
+        b_name = f"{opp_label} (Black)" if bot_plays_white else f"{bot_name} (Black)"
         nn_player = PLAYER_WHITE if bot_plays_white else PLAYER_BLACK
 
         state = self.create_game(game_id=game_id, white_name=w_name, black_name=b_name)
@@ -554,7 +554,7 @@ class ArenaBattleClient:
         num_games: int = 4,
         mode: str = "client",
         webhook_move_url: Optional[str] = None,
-        prefix: str = "tourney",
+        prefix: str = "",
     ) -> Dict[str, Any]:
         """Runs a paired multi-game match alternating White and Black against `opponent_agent`."""
         if num_games <= 0:
@@ -569,15 +569,19 @@ class ArenaBattleClient:
         for idx in range(num_games):
             bot_white = idx % 2 == 0
             nn_player = PLAYER_WHITE if bot_white else PLAYER_BLACK
-            gid = f"{prefix}-{opponent_agent}-{idx + 1}"
+            if bot_white:
+                matchup = f"TTT3DNet-white-vs-{opponent_agent}-black-{idx + 1}"
+            else:
+                matchup = f"{opponent_agent}-white-vs-TTT3DNet-black-{idx + 1}"
+            gid = f"{prefix}-{matchup}" if prefix else matchup
 
             if mode == "webhook":
                 if not webhook_move_url:
                     raise ValueError("webhook_move_url is required when mode='webhook'")
                 w_url = webhook_move_url if bot_white else server_bot_url
                 b_url = server_bot_url if bot_white else webhook_move_url
-                w_name = "PyTorch 3D-ResNet" if bot_white else f"Go {opponent_agent.capitalize()}"
-                b_name = f"Go {opponent_agent.capitalize()}" if bot_white else "PyTorch 3D-ResNet"
+                w_name = "TTT3DNet (White)" if bot_white else f"Go {opponent_agent.capitalize()} (White)"
+                b_name = f"Go {opponent_agent.capitalize()} (Black)" if bot_white else "TTT3DNet (Black)"
                 final_state = self.run_webhook_match(
                     white_bot_url=w_url,
                     black_bot_url=b_url,

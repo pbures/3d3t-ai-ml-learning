@@ -16,7 +16,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", default="checkpoints/ttt3d_latest.pt", help="Trained TTT3DNet checkpoint")
     parser.add_argument("--opponent", default="heuristic", choices=["random", "heuristic", "alphabeta", "mcts"])
     parser.add_argument("--games", type=int, default=4, help="Number of paired games to play")
-    parser.add_argument("--prefix", default="pytorch-nn", help="Game ID prefix for 3D Web UI replay list")
+    parser.add_argument("--prefix", default="", help="Optional game ID prefix for 3D Web UI replay list")
     parser.add_argument("--insecure", action="store_true", help="Skip TLS certificate verification (for localhost)")
     args = parser.parse_args()
 
