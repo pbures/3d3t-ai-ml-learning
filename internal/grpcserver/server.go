@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pbures/3d3t-ai-ml-learning/internal/agents"
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
@@ -202,12 +203,14 @@ func (s *EnvServer) SelectAction(_ context.Context, req *pb.SelectActionRequest)
 		agentName = "mcts"
 	}
 
+	seed := time.Now().UnixNano() ^ int64(snapshot.White) ^ int64(snapshot.Black) ^ int64(snapshot.MoveCount)
+
 	if agentName == "mcts" {
 		sims := int(req.Simulations)
 		if sims <= 0 {
 			sims = 200
 		}
-		mcts := agents.NewMCTSAgent(sims, int64(snapshot.MoveCount)+1)
+		mcts := agents.NewMCTSAgent(sims, seed)
 		act, policyArr, val, err := mcts.SearchWithPolicy(snapshot)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "%v", err)
@@ -220,7 +223,7 @@ func (s *EnvServer) SelectAction(_ context.Context, req *pb.SelectActionRequest)
 		}, nil
 	}
 
-	ag, err := agents.NewAgentByName(agentName, int64(snapshot.MoveCount)+1)
+	ag, err := agents.NewAgentByName(agentName, seed)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
