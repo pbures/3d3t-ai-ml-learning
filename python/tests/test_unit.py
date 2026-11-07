@@ -188,6 +188,7 @@ def test_network_forward_predict_and_select_action(tmp_path: Path) -> None:
 
 
 def test_replay_buffer_and_training_convergence() -> None:
+    torch.manual_seed(123)
     with pytest.raises(ValueError):
         ReplayBuffer(capacity=0)
 
