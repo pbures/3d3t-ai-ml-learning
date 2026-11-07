@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3T3D — 3D Gravity Tic-Tac-Toe Arena & Replay Studio</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --win: #10b981;
+      --warn: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+    }
+    #viewport-container {
+      flex: 1;
+      position: relative;
+      height: 100vh;
+    }
+    #hud-overlay {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+    #hud-overlay h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+    #hud-status {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+    #hud-sub {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    #sidebar {
+      width: 400px;
+      background: var(--panel);
+      border-left: 1px solid var(--panel-border);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 16px;
+      gap: 16px;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .card h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    select, button, input[type="range"] {
+      font-family: inherit;
+      font-size: 0.85rem;
+    }
+    select {
+      flex: 1;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      padding: 6px 8px;
+    }
+    button {
+      background: #334155;
+      color: var(--text);
+      border: 1px solid #475569;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) {
+      background: var(--accent-hover);
+      border-color: var(--accent);
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    button.primary {
+      background: var(--accent-hover);
+      border-color: var(--accent);
+    }
+    .replay-controls {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .grid-pad {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+    .grid-pad button {
+      padding: 8px 4px;
+      font-size: 0.78rem;
+      text-align: center;
+    }
+    #move-list {
+      max-height: 230px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .move-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .move-item:hover {
+      background: rgba(56, 189, 248, 0.15);
+    }
+    .move-item.active {
+      background: rgba(56, 189, 248, 0.3);
+      border-left: 3px solid var(--accent);
+    }
+    .badge-white {
+      color: #f8fafc;
+      font-weight: 700;
+    }
+    .badge-black {
+      color: #94a3b8;
+      font-weight: 700;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="viewport-container">
+    <div id="hud-overlay">
+      <h1>3T3D — 4×4×4 Gravity Arena</h1>
+      <div id="hud-status">Loading game...</div>
+      <div id="hud-sub">Drag to orbit 3D board • Scroll to zoom • Click a peg or column button to place ball</div>
+    </div>
+  </div>
+
+  <div id="sidebar">
+    <div class="card">
+      <h2>Game Session & Presets</h2>
+      <div class="row">
+        <select id="game-select"></select>
+        <button id="btn-new-game" class="primary">+ New</button>
+        <button id="btn-reset-game">Reset</button>
+      </div>
+      <div class="row" style="margin-bottom:0; flex-wrap:wrap;">
+        <button id="btn-preset-diag3d" title="Load a 3D Space Diagonal win replay">3D Diag Win</button>
+        <button id="btn-preset-ortho" title="Load an Orthogonal X-Line win replay">Ortho Win</button>
+        <button id="btn-preset-draw" title="Load a full 64-move Draw game replay">64-Move Draw</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Step-by-Step Replay Controls</h2>
+      <div class="replay-controls">
+        <button id="btn-first" title="Jump to Start (Move 0)">|&lt;&lt;</button>
+        <button id="btn-prev" title="Step Backward 1 Move">&lt;</button>
+        <button id="btn-play" class="primary" title="Play / Pause Auto-Replay">Play</button>
+        <button id="btn-next" title="Step Forward 1 Move">&gt;</button>
+        <button id="btn-last" title="Jump to Latest Move">&gt;&gt;|</button>
+      </div>
+      <div class="row">
+        <span style="font-size:0.8rem; color:var(--muted);">Ply:</span>
+        <input type="range" id="ply-slider" min="0" max="0" value="0" style="flex:1;" />
+        <span id="ply-label" style="font-size:0.82rem; min-width:52px; text-align:right;">0 / 0</span>
+      </div>
+      <div class="row" style="margin-bottom:0;">
+        <span style="font-size:0.8rem; color:var(--muted);">Replay Speed:</span>
+        <select id="speed-select">
+          <option value="800">Slow (0.8s / move)</option>
+          <option value="450" selected>Normal (0.45s / move)</option>
+          <option value="180">Fast (0.18s / move)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Drop Ball — Column (X, Y)</h2>
+      <div id="column-pad" class="grid-pad"></div>
+    </div>
+
+    <div class="card" style="flex:1; display:flex; flex-direction:column;">
+      <h2>Move History (Click to Jump)</h2>
+      <div id="move-list"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let currentGame = null;
+    let replayPly = 0;
+    let playTimer = null;
+
+    // --- 3D Scene Initialization ---
+    const container = document.getElementById('viewport-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0f172a);
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+    camera.position.set(6.8, 6.2, 8.2);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 1.4, 0);
+
+    // Lights
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+    dirLight.position.set(8, 14, 10);
+    scene.add(dirLight);
+
+    // Board Geometry Constants
+    const SPACING = 1.35;
+    const OFFSET = (3 * SPACING) / 2;
+    const LEVEL_H = 0.92;
+    const BALL_RADIUS = 0.42;
+
+    function boardToWorld(x, y, z) {
+      return new THREE.Vector3(
+        x * SPACING - OFFSET,
+        0.5 + z * LEVEL_H,
+        y * SPACING - OFFSET
+      );
+    }
+
+    // Base Platform
+    const baseGeo = new THREE.BoxGeometry(6.4, 0.35, 6.4);
+    const baseMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4, metalness: 0.2 });
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    baseMesh.position.set(0, -0.15, 0);
+    scene.add(baseMesh);
+
+    // 16 Vertical Pegs
+    const pegMeshes = [];
+    const pegGeo = new THREE.CylinderGeometry(0.08, 0.08, 3.8, 20);
+    const pegMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.5, roughness: 0.3 });
+
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const peg = new THREE.Mesh(pegGeo, pegMat.clone());
+        peg.position.set(x * SPACING - OFFSET, 1.85, y * SPACING - OFFSET);
+        peg.userData = { action: 4 * y + x, x, y };
+        scene.add(peg);
+        pegMeshes.push(peg);
+      }
+    }
+
+    // Dynamic Group for Balls, Highlight Halo, and Winning Line Beam
+    const dynamicGroup = new THREE.Group();
+    scene.add(dynamicGroup);
+
+    const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.2, metalness: 0.1 });
+    const blackMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.25, metalness: 0.35 });
+    const winWhiteMat = new THREE.MeshStandardMaterial({ color: 0x34d399, emissive: 0x059669, emissiveIntensity: 0.45 });
+    const winBlackMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 0.45 });
+    const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 28, 28);
+
+    function renderBoardAtPly(ply) {
+      while (dynamicGroup.children.length > 0) {
+        dynamicGroup.remove(dynamicGroup.children[0]);
+      }
+      if (!currentGame) return;
+
+      const history = currentGame.history || [];
+      const clampedPly = Math.max(0, Math.min(ply, history.length));
+      const isFinalPly = clampedPly === history.length;
+
+      // Determine winning coordinates if at final ply and game was won
+      const winCoordSet = new Set();
+      if (isFinalPly && currentGame.win_line_coords && currentGame.win_line_coords.length === 4) {
+        for (const wc of currentGame.win_line_coords) {
+          winCoordSet.add(`${wc.x},${wc.y},${wc.z}`);
+        }
+      }
+
+      for (let i = 0; i < clampedPly; i++) {
+        const mv = history[i];
+        const key = `${mv.x},${mv.y},${mv.z}`;
+        const isWinBall = winCoordSet.has(key);
+        let mat = mv.player === 1 ? (isWinBall ? winWhiteMat : whiteMat) : (isWinBall ? winBlackMat : blackMat);
+
+        const sphere = new THREE.Mesh(ballGeo, mat);
+        sphere.position.copy(boardToWorld(mv.x, mv.y, mv.z));
+        dynamicGroup.add(sphere);
+
+        // Highlight halo around the ball placed on the current replay step
+        if (i === clampedPly - 1) {
+          const ringGeo = new THREE.TorusGeometry(BALL_RADIUS * 1.12, 0.045, 16, 36);
+          const ringMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+          const ring = new THREE.Mesh(ringGeo, ringMat);
+          ring.position.copy(sphere.position);
+          ring.rotation.x = Math.PI / 2;
+          dynamicGroup.add(ring);
+        }
+      }
+
+      // Draw glowing 3D beam connecting the 4 winning coordinates
+      if (isFinalPly && currentGame.win_line_coords && currentGame.win_line_coords.length === 4) {
+        const pStart = boardToWorld(
+          currentGame.win_line_coords[0].x,
+          currentGame.win_line_coords[0].y,
+          currentGame.win_line_coords[0].z
+        );
+        const pEnd = boardToWorld(
+          currentGame.win_line_coords[3].x,
+          currentGame.win_line_coords[3].y,
+          currentGame.win_line_coords[3].z
+        );
+        const dir = new THREE.Vector3().subVectors(pEnd, pStart);
+        const len = dir.length() + 0.5;
+        const mid = new THREE.Vector3().addVectors(pStart, pEnd).multiplyScalar(0.5);
+
+        const beamGeo = new THREE.CylinderGeometry(0.11, 0.11, len, 16);
+        const beamMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.85 });
+        const beam = new THREE.Mesh(beamGeo, beamMat);
+        beam.position.copy(mid);
+        beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+        dynamicGroup.add(beam);
+      }
+    }
+
+    // --- UI Updates & Controls ---
+    const hudStatus = document.getElementById('hud-status');
+    const plySlider = document.getElementById('ply-slider');
+    const plyLabel = document.getElementById('ply-label');
+    const moveListEl = document.getElementById('move-list');
+    const columnPad = document.getElementById('column-pad');
+    const btnPlay = document.getElementById('btn-play');
+
+    // Build 4x4 Column Pad
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const action = 4 * y + x;
+        const btn = document.createElement('button');
+        btn.id = `col-btn-${action}`;
+        btn.textContent = `(${x},${y})`;
+        btn.onclick = () => submitMove(action);
+        columnPad.appendChild(btn);
+      }
+    }
+
+    function stopAutoPlay() {
+      if (playTimer) {
+        clearInterval(playTimer);
+        playTimer = null;
+      }
+      btnPlay.textContent = 'Play';
+    }
+
+    function setReplayPly(newPly) {
+      if (!currentGame) return;
+      const total = (currentGame.history || []).length;
+      replayPly = Math.max(0, Math.min(newPly, total));
+      plySlider.max = total;
+      plySlider.value = replayPly;
+      plyLabel.textContent = `${replayPly} / ${total}`;
+
+      renderBoardAtPly(replayPly);
+      updateHUDAndMoveList();
+    }
+
+    function updateHUDAndMoveList() {
+      if (!currentGame) return;
+      const history = currentGame.history || [];
+      const total = history.length;
+      const isLiveTip = replayPly === total;
+
+      if (!isLiveTip) {
+        const mv = history[replayPly - 1];
+        if (!mv) {
+          hudStatus.textContent = `REPLAY MODE — Initial Empty Board (Ply 0 / ${total})`;
+        } else {
+          const pName = mv.player === 1 ? 'WHITE' : 'BLACK';
+          hudStatus.textContent = `REPLAY MODE (Ply ${replayPly}/${total}) — ${pName} played (${mv.x}, ${mv.y}, z=${mv.z})`;
+        }
+      } else {
+        if (currentGame.status === 'WHITE_WON') {
+          hudStatus.textContent = `🏆 WHITE WON on Line #${currentGame.win_line_index} (${currentGame.win_line_category})!`;
+        } else if (currentGame.status === 'BLACK_WON') {
+          hudStatus.textContent = `🏆 BLACK WON on Line #${currentGame.win_line_index} (${currentGame.win_line_category})!`;
+        } else if (currentGame.status === 'DRAW') {
+          hudStatus.textContent = `🤝 DRAW — All 64 positions filled with no 4-in-a-row!`;
+        } else {
+          const turnName = currentGame.current_player === 1 ? 'WHITE (Player 1)' : 'BLACK (Player 2)';
+          hudStatus.textContent = `Turn: ${turnName} — Move ${total + 1}`;
+        }
+      }
+
+      // Update column buttons enabled state
+      for (let a = 0; a < 16; a++) {
+        const btn = document.getElementById(`col-btn-${a}`);
+        const valid = isLiveTip && currentGame.status === 'ONGOING' && ((currentGame.valid_moves_mask & (1 << a)) !== 0);
+        btn.disabled = !valid;
+      }
+
+      // Render Move History list
+      moveListEl.innerHTML = '';
+      const startRow = document.createElement('div');
+      startRow.className = 'move-item' + (replayPly === 0 ? ' active' : '');
+      startRow.innerHTML = `<span>#0 — Empty Board</span><span>Start</span>`;
+      startRow.onclick = () => { stopAutoPlay(); setReplayPly(0); };
+      moveListEl.appendChild(startRow);
+
+      history.forEach((mv, idx) => {
+        const plyNum = idx + 1;
+        const row = document.createElement('div');
+        row.className = 'move-item' + (replayPly === plyNum ? ' active' : '');
+        const pClass = mv.player === 1 ? 'badge-white' : 'badge-black';
+        const pLabel = mv.player === 1 ? '● WHITE' : '○ BLACK';
+        row.innerHTML = `<span class="${pClass}">#${plyNum} ${pLabel}</span><span>Col (${mv.x},${mv.y}) → z=${mv.z}</span>`;
+        row.onclick = () => { stopAutoPlay(); setReplayPly(plyNum); };
+        moveListEl.appendChild(row);
+      });
+    }
+
+    // --- API Calls ---
+    async function refreshGameList(selectedId) {
+      const res = await fetch('/api/v1/games');
+      const data = await res.json();
+      const sel = document.getElementById('game-select');
+      sel.innerHTML = '';
+      (data.games || []).forEach(g => {
+        const opt = document.createElement('option');
+        opt.value = g.game_id;
+        opt.textContent = `${g.game_id} (${g.status}, ${g.move_count} moves)`;
+        if (g.game_id === selectedId) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    }
+
+    async function loadGame(gameId, jumpToStart = false) {
+      stopAutoPlay();
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(gameId)}`);
+      if (!res.ok) return;
+      currentGame = await res.json();
+      await refreshGameList(currentGame.game_id);
+      const total = (currentGame.history || []).length;
+      setReplayPly(jumpToStart ? 0 : total);
+    }
+
+    async function submitMove(action) {
+      if (!currentGame || currentGame.status !== 'ONGOING') return;
+      const total = (currentGame.history || []).length;
+      if (replayPly !== total) return;
+
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        currentGame = data.state;
+        await refreshGameList(currentGame.game_id);
+        setReplayPly((currentGame.history || []).length);
+      }
+    }
+
+    async function loadPreset(body) {
+      if (!currentGame) return;
+      stopAutoPlay();
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/preset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (res.ok) {
+        currentGame = await res.json();
+        await refreshGameList(currentGame.game_id);
+        setReplayPly((currentGame.history || []).length);
+      }
+    }
+
+    // Event Listeners
+    document.getElementById('game-select').onchange = (e) => loadGame(e.target.value);
+    document.getElementById('btn-new-game').onclick = async () => {
+      const res = await fetch('/api/v1/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (res.ok) {
+        const g = await res.json();
+        await loadGame(g.game_id);
+      }
+    };
+    document.getElementById('btn-reset-game').onclick = async () => {
+      if (!currentGame) return;
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/reset`, { method: 'POST' });
+      if (res.ok) {
+        currentGame = await res.json();
+        await refreshGameList(currentGame.game_id);
+        setReplayPly(0);
+      }
+    };
+
+    document.getElementById('btn-preset-diag3d').onclick = () => loadPreset({ type: 'win', line_index: 72, winner: 1 });
+    document.getElementById('btn-preset-ortho').onclick = () => loadPreset({ type: 'win', line_index: 0, winner: 2 });
+    document.getElementById('btn-preset-draw').onclick = () => loadPreset({ type: 'draw' });
+
+    document.getElementById('btn-first').onclick = () => { stopAutoPlay(); setReplayPly(0); };
+    document.getElementById('btn-prev').onclick = () => { stopAutoPlay(); setReplayPly(replayPly - 1); };
+    document.getElementById('btn-next').onclick = () => { stopAutoPlay(); setReplayPly(replayPly + 1); };
+    document.getElementById('btn-last').onclick = () => {
+      stopAutoPlay();
+      if (currentGame) setReplayPly((currentGame.history || []).length);
+    };
+    plySlider.oninput = (e) => { stopAutoPlay(); setReplayPly(parseInt(e.target.value, 10)); };
+
+    btnPlay.onclick = () => {
+      if (playTimer) {
+        stopAutoPlay();
+        return;
+      }
+      if (!currentGame) return;
+      const total = (currentGame.history || []).length;
+      if (replayPly >= total) {
+        setReplayPly(0);
+      }
+      btnPlay.textContent = 'Pause';
+      const intervalMs = parseInt(document.getElementById('speed-select').value, 10) || 450;
+      playTimer = setInterval(() => {
+        const maxPly = (currentGame.history || []).length;
+        if (replayPly < maxPly) {
+          setReplayPly(replayPly + 1);
+        } else {
+          stopAutoPlay();
+        }
+      }, intervalMs);
+    };
+
+    // 3D Peg Click via Raycaster
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let pointerDownPos = { x: 0, y: 0 };
+
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      pointerDownPos = { x: e.clientX, y: e.clientY };
+    });
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      const dist = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+      if (dist > 6) return; // Ignore camera drag
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(pegMeshes);
+      if (hits.length > 0) {
+        submitMove(hits[0].object.userData.action);
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Load default game on startup
+    loadGame('default');
+  </script>
+</body>
+</html>
