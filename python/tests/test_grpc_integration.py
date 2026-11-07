@@ -234,6 +234,7 @@ def test_symmetry_matches_go_bitboard_engine_exactly(
 def test_end_to_end_self_play_vectorized_pool_and_training(
     grpc_client: VectorizedEnvClient,
 ) -> None:
+    torch.manual_seed(2026)
     rng = np.random.default_rng(2026)
     net = TTT3DNet(channels=16, num_blocks=2)
     optimizer = torch.optim.AdamW(net.parameters(), lr=3e-3, weight_decay=1e-4)
@@ -299,9 +300,14 @@ def test_end_to_end_self_play_vectorized_pool_and_training(
     assert reset_res["num_envs"] == 4
     assert reset_res["obs"].shape == (4, 3, 4, 4, 4)
 
-    # 4. Run gradient optimization steps and verify finite, decreasing loss
-    m1 = train_epoch(net, optimizer, buffer, batch_size=32, steps_per_epoch=2, rng=rng)
-    m2 = train_epoch(net, optimizer, buffer, batch_size=32, steps_per_epoch=15, rng=rng)
+    # 4. Run gradient optimization steps and verify finite, decreasing loss on fixed batch sequence
+    m1 = train_epoch(
+        net, optimizer, buffer, batch_size=64, steps_per_epoch=4, rng=np.random.default_rng(77)
+    )
+    _ = train_epoch(net, optimizer, buffer, batch_size=64, steps_per_epoch=20, rng=rng)
+    m2 = train_epoch(
+        net, optimizer, buffer, batch_size=64, steps_per_epoch=4, rng=np.random.default_rng(77)
+    )
     assert np.isfinite(m1["total_loss"]) and np.isfinite(m2["total_loss"])
     assert m2["total_loss"] < m1["total_loss"]
 

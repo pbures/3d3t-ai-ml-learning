@@ -187,7 +187,6 @@ func TestArenaWinRatesAgainstRandom(t *testing.T) {
 		NewHeuristicAgent(),
 		NewAlphaBetaAgent(2),
 		NewMCTSAgent(80, 12345),
-		NewTTT3DNetAgent(false),
 	}
 
 	for _, challenger := range challengers {
@@ -209,6 +208,17 @@ func TestArenaWinRatesAgainstRandom(t *testing.T) {
 		if winRate < 0.90 {
 			t.Fatalf("agent %s achieved only %.1f%% (%d/%d) win rate vs Random, expected >= 90%%",
 				challenger.Name(), winRate*100, wins, total)
+		}
+	}
+
+	// Verify pure TTT3DNetAgent wins 100% (4/4) against Random (kept concise for -race speed)
+	pureNN := NewTTT3DNetAgent(false)
+	for i := 0; i < 2; i++ {
+		if winner := playMatch(pureNN, NewRandomAgent(int64(300+i))); winner != engine.PlayerWhite {
+			t.Fatalf("pure TTT3DNetAgent failed to win as White vs Random (seed %d)", 300+i)
+		}
+		if winner := playMatch(NewRandomAgent(int64(400+i)), pureNN); winner != engine.PlayerBlack {
+			t.Fatalf("pure TTT3DNetAgent failed to win as Black vs Random (seed %d)", 400+i)
 		}
 	}
 }
