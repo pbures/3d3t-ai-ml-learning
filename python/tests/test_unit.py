@@ -175,6 +175,14 @@ def test_network_forward_predict_and_select_action(tmp_path: Path) -> None:
     assert np.allclose(probs_loaded, probs_orig)
     assert val_loaded == pytest.approx(val_orig)
 
+    # Export fused binary weights for Go inference
+    bin_file = tmp_path / "models" / "ttt3d_fused.bin"
+    net.export_fused_binary(bin_file)
+    assert bin_file.exists()
+    raw_bin = bin_file.read_bytes()
+    assert raw_bin[:4] == b"3T3D"
+    assert len(raw_bin) > 600_000
+
 
 def test_replay_buffer_and_training_convergence() -> None:
     with pytest.raises(ValueError):

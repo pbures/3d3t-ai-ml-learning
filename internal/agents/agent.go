@@ -203,7 +203,7 @@ func (a *HeuristicAgent) SelectAction(g *engine.Game) (uint8, error) {
 	return bestAction, nil
 }
 
-// NewAgentByName instantiates one of the built-in agents ("random", "heuristic", "alphabeta", "mcts").
+// NewAgentByName instantiates one of the built-in agents ("random", "heuristic", "alphabeta", "mcts", "ttt3dnet", "ttt3dnet-pure").
 func NewAgentByName(name string, seed int64) (Agent, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "random":
@@ -214,7 +214,11 @@ func NewAgentByName(name string, seed int64) (Agent, error) {
 		return NewAlphaBetaAgent(3), nil
 	case "mcts":
 		return NewMCTSAgent(250, seed), nil
+	case "ttt3dnet", "neural", "nn":
+		return NewTTT3DNetAgent(true), nil
+	case "ttt3dnet-pure", "neural-pure", "nn-pure":
+		return NewTTT3DNetAgent(false), nil
 	default:
-		return nil, fmt.Errorf("%w: %q (valid: random, heuristic, alphabeta, mcts)", ErrUnknownAgent, name)
+		return nil, fmt.Errorf("%w: %q (valid: random, heuristic, alphabeta, mcts, ttt3dnet, ttt3dnet-pure)", ErrUnknownAgent, name)
 	}
 }

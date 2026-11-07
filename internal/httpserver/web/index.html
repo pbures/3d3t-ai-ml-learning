@@ -226,15 +226,23 @@
     </div>
 
     <div class="card">
-      <h2>AI Agents (Phase 3)</h2>
-      <div class="row" style="margin-bottom:0;">
+      <h2>AI Opponent & Neural Models</h2>
+      <div class="row">
         <select id="ai-agent-select">
-          <option value="mcts" selected>MCTS (UCT Tree Search)</option>
-          <option value="alphabeta">Alpha-Beta (Negamax)</option>
-          <option value="heuristic">Tactical Heuristic</option>
+          <option value="ttt3dnet" selected>TTT3DNet Hybrid (3D ResNet + 2-Ply Shield)</option>
+          <option value="ttt3dnet-pure">TTT3DNet Pure (Raw 3D ResNet Forward Pass)</option>
+          <option value="mcts">MCTS (250 UCT Simulations)</option>
+          <option value="alphabeta">Alpha-Beta (Depth-3 Negamax)</option>
+          <option value="heuristic">Tactical Heuristic (1-Ply + 76 Lines)</option>
           <option value="random">Random Agent</option>
         </select>
         <button id="btn-ai-move" class="primary">Step AI Move</button>
+      </div>
+      <div class="row" style="margin-bottom:0; font-size:0.8rem; color:var(--muted);">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          <input type="checkbox" id="chk-auto-ai" checked />
+          Auto-reply with selected AI after my move
+        </label>
       </div>
     </div>
 
@@ -510,21 +518,55 @@
       setReplayPly(jumpToStart ? 0 : total);
     }
 
+    let isBusy = false;
+
+    async function triggerAIMove() {
+      if (!currentGame || currentGame.status !== 'ONGOING' || isBusy) return;
+      isBusy = true;
+      try {
+        stopAutoPlay();
+        const agent = document.getElementById('ai-agent-select').value;
+        const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/ai-move`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          currentGame = data.state;
+          await refreshGameList(currentGame.game_id);
+          setReplayPly((currentGame.history || []).length);
+        }
+      } finally {
+        isBusy = false;
+      }
+    }
+
     async function submitMove(action) {
-      if (!currentGame || currentGame.status !== 'ONGOING') return;
+      if (!currentGame || currentGame.status !== 'ONGOING' || isBusy) return;
       const total = (currentGame.history || []).length;
       if (replayPly !== total) return;
 
-      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/move`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        currentGame = data.state;
-        await refreshGameList(currentGame.game_id);
-        setReplayPly((currentGame.history || []).length);
+      isBusy = true;
+      try {
+        const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/move`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          currentGame = data.state;
+          await refreshGameList(currentGame.game_id);
+          setReplayPly((currentGame.history || []).length);
+        }
+      } finally {
+        isBusy = false;
+      }
+
+      const autoAI = document.getElementById('chk-auto-ai');
+      if (autoAI && autoAI.checked && currentGame && currentGame.status === 'ONGOING') {
+        await triggerAIMove();
       }
     }
 
@@ -566,22 +608,7 @@
     document.getElementById('btn-preset-ortho').onclick = () => loadPreset({ type: 'win', line_index: 0, winner: 2 });
     document.getElementById('btn-preset-draw').onclick = () => loadPreset({ type: 'draw' });
 
-    document.getElementById('btn-ai-move').onclick = async () => {
-      if (!currentGame || currentGame.status !== 'ONGOING') return;
-      stopAutoPlay();
-      const agent = document.getElementById('ai-agent-select').value;
-      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/ai-move`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        currentGame = data.state;
-        await refreshGameList(currentGame.game_id);
-        setReplayPly((currentGame.history || []).length);
-      }
-    };
+    document.getElementById('btn-ai-move').onclick = () => triggerAIMove();
 
     document.getElementById('btn-first').onclick = () => { stopAutoPlay(); setReplayPly(0); };
     document.getElementById('btn-prev').onclick = () => { stopAutoPlay(); setReplayPly(replayPly - 1); };
