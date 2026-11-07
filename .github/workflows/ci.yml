@@ -46,6 +46,22 @@ jobs:
             printf "Code coverage check passed: %.1f%% >= 90.0%%\n", cov
           }'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python PyTorch (CPU) & gRPC/Test Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r python/requirements.txt
+
+      - name: Run Python Unit & gRPC Integration Tests (>= 90% Coverage)
+        run: |
+          pytest -v --cov=python/ttt3d --cov-config=pytest.ini --cov-report=term-missing --cov-fail-under=90
+
   build-and-update-argocd:
     name: Build GHCR Image & Update ArgoCD Deploy Branch
     needs: test-and-coverage
