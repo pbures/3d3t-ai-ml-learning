@@ -368,8 +368,23 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 		}, &blackStart); c != http.StatusCreated {
 			t.Fatalf("expected 201 Created, got %d", c)
 		}
-		if blackStart.Name != "Grand Finals Game 1 — External Algo vs TTT3DNet" || blackStart.MoveCount != 1 || blackStart.CurrentPlayer != 2 {
-			t.Fatalf("expected AI to make opening White move on human_player=2, got %+v", blackStart)
+		if blackStart.Name != "SW - Grand Finals Game 1 — External Algo vs TTT3DNet" || blackStart.MoveCount != 1 || blackStart.CurrentPlayer != 2 {
+			t.Fatalf("expected AI to make opening White move on human_player=2 with SW prefix, got %+v", blackStart)
+		}
+
+		// Verify CW prefix when client starts first as White (human_player=1)
+		var whiteStart GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/games", CreateGameRequest{
+			GameID:        "named-match-white",
+			Name:          "Grand Finals Game 2 — External Algo vs TTT3DNet",
+			WhiteName:     "ExternalAlgo",
+			OpponentAgent: "ttt3dnet",
+			HumanPlayer:   1,
+		}, &whiteStart); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created, got %d", c)
+		}
+		if whiteStart.Name != "CW - Grand Finals Game 2 — External Algo vs TTT3DNet" {
+			t.Fatalf("expected CW prefix when client starts White, got %q", whiteStart.Name)
 		}
 
 		// 3. Submit external player's Black move and verify automatic AI White reply (ai_move != nil, move_count == 3)
