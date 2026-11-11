@@ -465,6 +465,40 @@ class ArenaBattleClient:
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/api/v1/health")
 
+    def get_openapi_spec(self) -> Dict[str, Any]:
+        return self._request("GET", "/openapi.json")
+
+    def mcp_rpc(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        rpc_id: int = 1,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"jsonrpc": "2.0", "id": rpc_id, "method": method}
+        if params is not None:
+            payload["params"] = params
+        return self._request("POST", "/mcp", payload)
+
+    def mcp_call_tool(
+        self,
+        name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        rpc_id: int = 1,
+    ) -> Dict[str, Any]:
+        resp = self.mcp_rpc(
+            "tools/call",
+            {"name": name, "arguments": arguments or {}},
+            rpc_id=rpc_id,
+        )
+        result = resp.get("result") or {}
+        if result.get("isError"):
+            raise RuntimeError(f"MCP tool {name} failed: {result}")
+        return dict(result.get("structuredContent") or {})
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        resp = self._request("GET", "/api/v1/models")
+        return list(resp.get("models") or [])
+
     def get_win_lines(self) -> List[Dict[str, Any]]:
         resp = self._request("GET", "/api/v1/winlines")
         return list(resp.get("lines") or [])
@@ -476,14 +510,42 @@ class ArenaBattleClient:
     def create_game(
         self,
         game_id: str = "",
+        name: str = "",
         white_name: str = "Player 1 (White)",
         black_name: str = "Player 2 (Black)",
+        opponent_agent: str = "",
+        human_player: int = 0,
     ) -> Dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/v1/games",
-            {"game_id": game_id, "white_name": white_name, "black_name": black_name},
-        )
+        payload: Dict[str, Any] = {
+            "game_id": game_id,
+            "name": name,
+            "white_name": white_name,
+            "black_name": black_name,
+        }
+        if opponent_agent:
+            payload["opponent_agent"] = opponent_agent
+        if human_player in (1, 2):
+            payload["human_player"] = int(human_player)
+        return self._request("POST", "/api/v1/games", payload)
+
+    def rename_game(
+        self,
+        game_id: str,
+        name: Optional[str] = None,
+        white_name: Optional[str] = None,
+        black_name: Optional[str] = None,
+        opponent_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if white_name is not None:
+            payload["white_name"] = white_name
+        if black_name is not None:
+            payload["black_name"] = black_name
+        if opponent_agent is not None:
+            payload["opponent_agent"] = opponent_agent
+        return self._request("PATCH", f"/api/v1/games/{game_id}", payload)
 
     def get_game(self, game_id: str = "default") -> Dict[str, Any]:
         return self._request("GET", f"/api/v1/games/{game_id}")
@@ -499,6 +561,8 @@ class ArenaBattleClient:
         use_coords: bool = False,
         x: int = 0,
         y: int = 0,
+        opponent_agent: str = "",
+        auto_reply: Optional[bool] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"use_coords": bool(use_coords)}
         if player != 0:
@@ -508,6 +572,10 @@ class ArenaBattleClient:
             body["y"] = int(y)
         elif action is not None:
             body["action"] = int(action)
+        if opponent_agent:
+            body["opponent_agent"] = opponent_agent
+        if auto_reply is not None:
+            body["auto_reply"] = bool(auto_reply)
         return self._request("POST", f"/api/v1/games/{game_id}/move", body)
 
     def trigger_ai_move(self, game_id: str, agent: str = "heuristic") -> Dict[str, Any]:
@@ -528,11 +596,14 @@ class ArenaBattleClient:
 
     def run_webhook_match(
         self,
-        white_bot_url: str,
-        black_bot_url: str,
+        white_bot_url: str = "",
+        black_bot_url: str = "",
         game_id: str = "",
+        name: str = "",
         white_name: str = "White Bot",
         black_name: str = "Black Bot",
+        white_agent: str = "",
+        black_agent: str = "",
         timeout_ms: int = 5000,
     ) -> Dict[str, Any]:
         return self._request(
@@ -540,10 +611,13 @@ class ArenaBattleClient:
             "/api/v1/matches/run",
             {
                 "game_id": game_id,
+                "name": name,
                 "white_name": white_name,
                 "black_name": black_name,
                 "white_bot_url": white_bot_url,
                 "black_bot_url": black_bot_url,
+                "white_agent": white_agent,
+                "black_agent": black_agent,
                 "timeout_ms": int(timeout_ms),
             },
         )
@@ -553,6 +627,7 @@ class ArenaBattleClient:
         bot: NeuralArenaBot,
         opponent_agent: str = "heuristic",
         game_id: str = "",
+        name: str = "",
         bot_plays_white: bool = True,
         bot_name: str = "TTT3DNet",
     ) -> Dict[str, Any]:
@@ -561,8 +636,14 @@ class ArenaBattleClient:
         w_name = f"{bot_name} (White)" if bot_plays_white else f"{opp_label} (White)"
         b_name = f"{opp_label} (Black)" if bot_plays_white else f"{bot_name} (Black)"
         nn_player = PLAYER_WHITE if bot_plays_white else PLAYER_BLACK
+        match_name = name if name else (f"{w_name} vs {b_name}")
 
-        state = self.create_game(game_id=game_id, white_name=w_name, black_name=b_name)
+        state = self.create_game(
+            game_id=game_id,
+            name=match_name,
+            white_name=w_name,
+            black_name=b_name,
+        )
         actual_gid = str(state["game_id"])
 
         while str(state.get("status", "ONGOING")) == "ONGOING":
@@ -588,6 +669,7 @@ class ArenaBattleClient:
         mode: str = "client",
         webhook_move_url: Optional[str] = None,
         prefix: str = "",
+        match_name: str = "",
     ) -> Dict[str, Any]:
         """Runs a paired multi-game match alternating White and Black against `opponent_agent`."""
         if num_games <= 0:
@@ -607,6 +689,7 @@ class ArenaBattleClient:
             else:
                 matchup = f"{opponent_agent}-white-vs-TTT3DNet-black-{idx + 1}"
             gid = f"{prefix}-{matchup}" if prefix else matchup
+            title = f"{match_name} (#{idx + 1})" if match_name else gid
 
             if mode == "webhook":
                 if not webhook_move_url:
@@ -619,6 +702,7 @@ class ArenaBattleClient:
                     white_bot_url=w_url,
                     black_bot_url=b_url,
                     game_id=gid,
+                    name=title,
                     white_name=w_name,
                     black_name=b_name,
                 )
@@ -627,6 +711,7 @@ class ArenaBattleClient:
                     bot=bot,
                     opponent_agent=opponent_agent,
                     game_id=gid,
+                    name=title,
                     bot_plays_white=bot_white,
                 )
 

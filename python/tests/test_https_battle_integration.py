@@ -284,3 +284,94 @@ def test_https_webhook_and_client_neural_tournaments(
         assert replay["status"] in ("WHITE_WON", "BLACK_WON", "DRAW")
         assert len(replay["history"]) == replay["move_count"]
         assert replay["move_count"] >= 7
+
+    # Verify OpenAPI 3.1 spec, models list, named matches, rename, and single-call AI reply
+    openapi = https_arena_client.get_openapi_spec()
+    assert openapi["openapi"] == "3.1.0"
+    assert "/api/v1/games" in openapi["paths"]
+
+    models = https_arena_client.list_models()
+    model_ids = {m["id"] for m in models}
+    assert {"ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"} <= model_ids
+
+    named_game = https_arena_client.create_game(
+        game_id="py-named-match",
+        name="Python External Algorithm vs TTT3DNet",
+        white_name="MyExternalBot",
+        black_name="TTT3DNet",
+        opponent_agent="ttt3dnet",
+        human_player=1,
+    )
+    assert named_game["name"] == "Python External Algorithm vs TTT3DNet"
+    assert named_game["opponent_agent"] == "ttt3dnet"
+
+    move_out = https_arena_client.submit_move(
+        "py-named-match",
+        action=5,
+        player=1,
+        opponent_agent="ttt3dnet",
+        auto_reply=True,
+    )
+    assert move_out["ai_move"] is not None
+    assert move_out["state"]["move_count"] == 2
+
+    renamed = https_arena_client.rename_game(
+        "py-named-match",
+        name="Renamed Championship Match",
+        white_name="UpdatedWhite",
+        black_name="UpdatedBlack",
+        opponent_agent="heuristic",
+    )
+    assert renamed["name"] == "Renamed Championship Match"
+    assert renamed["white_name"] == "UpdatedWhite"
+    assert renamed["black_name"] == "UpdatedBlack"
+    assert renamed["opponent_agent"] == "heuristic"
+
+    # Verify MCP JSON-RPC 2.0 layer over HTTPS (/mcp)
+    init_res = https_arena_client.mcp_rpc("initialize")
+    assert init_res["result"]["serverInfo"]["name"] == "3t3d-arena-mcp"
+
+    tools_res = https_arena_client.mcp_rpc("tools/list")
+    tool_names = {t["name"] for t in tools_res["result"]["tools"]}
+    assert {
+        "list_models",
+        "list_games",
+        "create_game",
+        "get_game",
+        "rename_game",
+        "play_move",
+        "trigger_ai_move",
+        "reset_game",
+        "run_match",
+    } <= tool_names
+
+    mcp_created = https_arena_client.mcp_call_tool(
+        "create_game",
+        {
+            "game_id": "mcp-https-game",
+            "name": "MCP HTTPS Game vs TTT3DNet",
+            "opponent_agent": "ttt3dnet",
+            "human_player": 2,
+        },
+    )
+    assert mcp_created["name"] == "MCP HTTPS Game vs TTT3DNet"
+    assert mcp_created["move_count"] == 1
+    assert mcp_created["current_player"] == 2
+
+    mcp_move = https_arena_client.mcp_call_tool(
+        "play_move",
+        {
+            "game_id": "mcp-https-game",
+            "action": int(mcp_created["valid_actions"][0]),
+            "player": 2,
+        },
+    )
+    assert mcp_move["ai_move"] is not None
+    assert mcp_move["state"]["move_count"] == 3
+
+    with pytest.raises(RuntimeError, match="MCP tool play_move failed"):
+        https_arena_client.mcp_call_tool(
+            "play_move", {"game_id": "mcp-https-game", "action": 99}
+        )
+
+

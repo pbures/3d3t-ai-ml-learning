@@ -9,3 +9,22 @@ To make gameplay and AI decision-making visually transparent, the Go server embe
 Before introducing deep neural networks, the repository establishes a rigorous ladder of **Classical Search and Baseline Agents** (`Random`, `Heuristic`, `Minimax` with Alpha-Beta pruning, and `Monte Carlo Tree Search` with UCT rollouts). These classical agents exploit the geometric structure of the $4 \times 4 \times 4$ cube—such as prioritizing the 16 "power cells" (the 8 interior core cells and 8 outer corners that sit at the intersections of the 3D space diagonals) and detecting immediate tactical threats—to provide calibrated, reproducible benchmarks against which learned policies are evaluated.
 
 Building upon this engine and benchmark suite, the machine learning pipeline uses **Python and PyTorch** to train a **3D Policy-Value Convolutional Neural Network** via self-play reinforcement learning. The neural network consumes a 3-channel $4 \times 4 \times 4$ canonical spatial representation of the board (current player's pieces, opponent's pieces, and playable gravity landing spots) and outputs both a 16-action policy distribution ($\pi$) and a scalar value estimate ($v \in [-1, +1]$), leveraging the 8-fold dihedral symmetry of the 3D cube during training and competing directly in the arena over the HTTPS Battle API.
+
+## Programmatic Arena API & OpenAPI 3.1 Specification (`https://3t3d.buresovi.net`)
+
+External players and developers can connect custom algorithms running on their own devices directly to the Arena Server over HTTPS:
+
+- **OpenAPI 3.1 Specification & Interactive Docs:**
+  - `GET https://3t3d.buresovi.net/openapi.json` — OpenAPI 3.1 JSON specification
+  - `GET https://3t3d.buresovi.net/openapi.yaml` — OpenAPI 3.1 YAML specification
+  - `GET https://3t3d.buresovi.net/docs` — Interactive Swagger UI documentation
+- **Discover Implemented AI Models (`GET /api/v1/models`):**
+  - Lists all built-in classical and neural models (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`).
+- **Create Named Matches & Play Against Built-in Models (`POST /api/v1/games`, `PATCH /api/v1/games/{id}`, `POST /api/v1/games/{id}/move`):**
+  - Give any match a custom human-readable `name` (e.g. `"Qualifying Match #1 — LaptopBot vs TTT3DNet"`), custom `game_id`, `white_name`, `black_name`, and optional `opponent_agent` (`"ttt3dnet"`, `"ttt3dnet-pure"`, `"mcts"`, `"alphabeta"`, `"heuristic"`, `"random"`).
+  - Submit moves programmatically via `POST /api/v1/games/{id}/move` using either `action` (`0..15`) or `(x, y)` coordinates (`use_coords: true`). When `opponent_agent` is set on the game or move request, the server automatically computes and applies the AI model's reply in the same call (`ai_move`).
+- **Model Context Protocol (MCP) Server Layer (`POST https://3t3d.buresovi.net/mcp` & `-mcp-stdio`):**
+  - Exposes a JSON-RPC 2.0 MCP server at `/mcp` (and `/api/v1/mcp`) as well as over stdio (`./arena-server -mcp-stdio`).
+  - Provides MCP tools (`list_models`, `list_games`, `create_game`, `get_game`, `rename_game`, `play_move`, `trigger_ai_move`, `reset_game`, `run_match`) and the `openapi://3t3d/openapi.json` MCP resource so LLM agents and MCP clients can discover models, create named games, choose whether they or the AI starts (`human_player: 1` or `2`), and play moves directly.
+
+
