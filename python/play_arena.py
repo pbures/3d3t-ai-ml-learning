@@ -14,9 +14,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Play 3T3D Neural Bot battles on an HTTPS Arena Server")
     parser.add_argument("--arena-url", default="https://3t3d.buresovi.net", help="Target HTTPS Arena Server URL")
     parser.add_argument("--checkpoint", default="checkpoints/ttt3d_latest.pt", help="Trained TTT3DNet checkpoint")
-    parser.add_argument("--opponent", default="heuristic", choices=["random", "heuristic", "alphabeta", "mcts"])
+    parser.add_argument(
+        "--opponent",
+        default="heuristic",
+        choices=["random", "heuristic", "alphabeta", "mcts", "ttt3dnet", "ttt3dnet-pure"],
+    )
     parser.add_argument("--games", type=int, default=4, help="Number of paired games to play")
     parser.add_argument("--prefix", default="", help="Optional game ID prefix for 3D Web UI replay list")
+    parser.add_argument("--name", default="", help="Optional human-readable match name for the tournament")
     parser.add_argument("--insecure", action="store_true", help="Skip TLS certificate verification (for localhost)")
     args = parser.parse_args()
 
@@ -37,6 +42,7 @@ def main() -> None:
         num_games=args.games,
         mode="client",
         prefix=args.prefix,
+        match_name=args.name,
     )
     print(
         f"Tournament complete on {args.arena_url} vs {args.opponent}: "

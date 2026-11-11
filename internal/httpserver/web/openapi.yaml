@@ -1,0 +1,816 @@
+openapi: 3.1.0
+info:
+  title: 3T3D — 3D Gravity Tic-Tac-Toe Arena & AI Battle API
+  version: 1.0.0
+  summary: Programmatic REST API for 4x4x4 Gravity Tic-Tac-Toe (3T3D), external algorithm bots, and built-in AI models.
+  description: |
+    Welcome to the **3T3D (3D Gravity Tic-Tac-Toe) Arena API** hosted at `https://3t3d.buresovi.net`.
+
+    This API allows external players and developers to connect custom algorithms running on their own devices to:
+    1. **Create Named Matches (`POST /api/v1/games`)** with custom match names (`name`), custom `game_id` slugs, player names (`white_name`, `black_name`), and optional automatic server-side AI opponents (`opponent_agent`, `human_player`).
+    2. **Control Games Programmatically (`POST /api/v1/games/{id}/move`)** using either discrete column actions (`action` in `0..15`, where `action = 4*y + x`) or 2D column coordinates (`use_coords: true, x: 0..3, y: 0..3`). If the game has an `opponent_agent` configured (or `opponent_agent` is passed on the move request), the server can automatically compute and apply the AI model's reply in the same turn!
+    3. **Play Against Built-in Classical & Neural Models (`GET /api/v1/models`, `POST /api/v1/games/{id}/ai-move`, `POST /api/v1/bots/{agent}/move`)**:
+       - `ttt3dnet` — Hybrid 3D ResNet (`TTT3DNet`) + 2-ply tactical fork shield & 1-ply value lookahead.
+       - `ttt3dnet-pure` — Pure single-pass 3D ResNet (`TTT3DNet`) policy inference.
+       - `mcts` — Monte Carlo Tree Search (250 UCT simulations per move).
+       - `alphabeta` — Depth-3 Negamax with Alpha-Beta pruning and 76-line heuristic evaluation.
+       - `heuristic` — Fast 1-ply tactical win/block + poison filter + 76-line positional heuristic.
+       - `random` — Uniform random legal column baseline.
+    4. **Orchestrate Bot-vs-Bot Matches (`POST /api/v1/matches/run`)** combining remote webhook URLs or built-in agent names.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: https://3t3d.buresovi.net
+    description: Production Kubernetes Arena Server (TLS / Ingress)
+  - url: http://localhost:8080
+    description: Local HTTP Development Server
+  - url: https://127.0.0.1:8443
+    description: Local Self-Signed HTTPS Server
+
+tags:
+  - name: System & Discovery
+    description: Health checks, OpenAPI specification, 76 winning lines geometry, and available AI models.
+  - name: Games & Programmatic Play
+    description: Create named matches, inspect 3D board states, submit algorithm moves, and play against built-in AI models.
+  - name: AI Models & Webhooks
+    description: Stateless model evaluation webhooks and automated bot-vs-bot match orchestration.
+
+paths:
+  /openapi.json:
+    get:
+      tags: [System & Discovery]
+      summary: Get OpenAPI 3.1 specification (JSON)
+      operationId: getOpenAPIJSON
+      responses:
+        "200":
+          description: OpenAPI 3.1 JSON document
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /openapi.yaml:
+    get:
+      tags: [System & Discovery]
+      summary: Get OpenAPI 3.1 specification (YAML)
+      operationId: getOpenAPIYAML
+      responses:
+        "200":
+          description: OpenAPI 3.1 YAML document
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /docs:
+    get:
+      tags: [System & Discovery]
+      summary: Interactive Swagger / OpenAPI Documentation UI
+      operationId: getDocsUI
+      responses:
+        "200":
+          description: HTML interactive API documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /mcp:
+    get:
+      tags: [System & Discovery]
+      summary: Model Context Protocol (MCP) server discovery & tool catalog
+      operationId: getMCPCatalog
+      responses:
+        "200":
+          description: MCP server metadata and available tools
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      tags: [System & Discovery]
+      summary: Model Context Protocol (MCP) JSON-RPC 2.0 Streamable HTTP endpoint
+      description: Accepts MCP JSON-RPC 2.0 requests (`initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `ping`) to control the 3T3D Arena API via MCP tools.
+      operationId: postMCPRPC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: MCP JSON-RPC 2.0 response
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/v1/health:
+    get:
+      tags: [System & Discovery]
+      summary: Health check endpoint
+      operationId: getHealth
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/v1/models:
+    get:
+      tags: [System & Discovery]
+      summary: List all implemented AI models available for play
+      description: Returns metadata for all built-in classical and neural network models (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`).
+      operationId: listModels
+      responses:
+        "200":
+          description: List of implemented AI models
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [models]
+                properties:
+                  models:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModelInfoDTO"
+
+  /api/v1/winlines:
+    get:
+      tags: [System & Discovery]
+      summary: List all 76 winning lines in the 4x4x4 cube
+      operationId: getWinLines
+      responses:
+        "200":
+          description: All 76 winning 4-in-a-row line definitions and bitmasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [lines]
+                properties:
+                  lines:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WinLineDTO"
+
+  /api/v1/games:
+    get:
+      tags: [Games & Programmatic Play]
+      summary: List all active and completed games
+      operationId: listGames
+      responses:
+        "200":
+          description: Array of game summaries sorted by game_id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [games]
+                properties:
+                  games:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GameSummaryDTO"
+    post:
+      tags: [Games & Programmatic Play]
+      summary: Create a new game session (with custom match name and optional AI opponent)
+      description: |
+        Creates a new 3T3D match. You can provide a human-friendly match `name` (e.g. `"Qualifying Match #1 — Laptop Bot vs TTT3DNet"`),
+        a custom `game_id`, `white_name`, `black_name`, and optionally an `opponent_agent` (`"ttt3dnet"`, `"ttt3dnet-pure"`, `"mcts"`, `"alphabeta"`, `"heuristic"`, `"random"`).
+        If `opponent_agent` is set and `human_player` is `2` (Black), the server AI automatically makes the opening White move (`move_count = 1`) before returning!
+      operationId: createGame
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGameRequest"
+      responses:
+        "201":
+          description: Created game state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "400":
+          description: Invalid JSON or unknown opponent_agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/games/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique game session identifier (`game_id`)
+        schema:
+          type: string
+    get:
+      tags: [Games & Programmatic Play]
+      summary: Get full game state and move history by ID
+      operationId: getGame
+      responses:
+        "200":
+          description: Full game state and replay history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "404":
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      tags: [Games & Programmatic Play]
+      summary: Rename a match or update player names / opponent model
+      operationId: updateGameMetadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGameRequest"
+      responses:
+        "200":
+          description: Updated game state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/games/{id}/move:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique game session identifier (`game_id`)
+        schema:
+          type: string
+    post:
+      tags: [Games & Programmatic Play]
+      summary: Submit a move from an external player/algorithm (with optional immediate AI reply)
+      description: |
+        Applies a column move for the current player. You may specify either `action` (`0..15`) or `use_coords: true` with `x` (`0..3`) and `y` (`0..3`).
+        If the game was created with an `opponent_agent` (or if you pass `opponent_agent` in this request body), and the game is still `ONGOING` after your move, the server automatically computes and applies the AI opponent's reply and returns it in `ai_move` alongside the updated `state`.
+      operationId: submitMove
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveRequest"
+      responses:
+        "200":
+          description: Move applied (and optional AI reply executed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoveResponseDTO"
+        "400":
+          description: Out-of-bounds action/coordinates, full column, or invalid JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Game already over or out-of-turn player
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/games/{id}/ai-move:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique game session identifier (`game_id`)
+        schema:
+          type: string
+    post:
+      tags: [Games & Programmatic Play]
+      summary: Trigger a move by one of the implemented AI models on the current game
+      operationId: triggerAIMove
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIMoveRequest"
+      responses:
+        "200":
+          description: AI move applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoveResponseDTO"
+        "400":
+          description: Unknown AI agent name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Game already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/games/{id}/reset:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique game session identifier (`game_id`)
+        schema:
+          type: string
+    post:
+      tags: [Games & Programmatic Play]
+      summary: Reset a game session back to an empty 4x4x4 board
+      operationId: resetGame
+      responses:
+        "200":
+          description: Reset game state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+
+  /api/v1/games/{id}/preset:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique game session identifier (`game_id`)
+        schema:
+          type: string
+    post:
+      tags: [Games & Programmatic Play]
+      summary: Load a deterministic preset replay (win line 0..75 or 64-move draw)
+      operationId: applyPreset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetRequest"
+      responses:
+        "200":
+          description: Game state after applying preset sequence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "400":
+          description: Invalid preset parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/bots/{agent}/move:
+    parameters:
+      - name: agent
+        in: path
+        required: true
+        description: Built-in model identifier (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`)
+        schema:
+          type: string
+          enum: [ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+    post:
+      tags: [AI Models & Webhooks]
+      summary: Stateless AI model evaluation webhook
+      description: Accepts a `GameStateDTO` JSON payload and returns the chosen `{"action": 0..15}` for the specified built-in model without mutating any server session.
+      operationId: evaluateBotMove
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GameStateDTO"
+      responses:
+        "200":
+          description: Selected column action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoveRequest"
+        "400":
+          description: Invalid state payload or unknown agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: No legal moves in terminal board state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/matches/run:
+    post:
+      tags: [AI Models & Webhooks]
+      summary: Orchestrate a full automated match between webhooks or built-in AI models
+      description: |
+        Runs a complete match from start to finish and records it for 3D replay.
+        Each side can be specified either as a remote webhook URL (`white_bot_url` / `black_bot_url`) **or** as a built-in model name (`white_agent` / `black_agent`, e.g. `"ttt3dnet"`, `"mcts"`, `"alphabeta"`, `"heuristic"`, `"random"`).
+      operationId: runMatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunMatchRequest"
+      responses:
+        "200":
+          description: Completed match state with full move history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "400":
+          description: Missing bot URLs/agents or invalid agent name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Remote webhook bot returned an error, timed out, or attempted an illegal move
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: invalid action
+
+    ModelInfoDTO:
+      type: object
+      required: [id, name, type, description]
+      properties:
+        id:
+          type: string
+          example: ttt3dnet
+        name:
+          type: string
+          example: TTT3DNet Hybrid (3D ResNet + 2-Ply Tactical Shield)
+        type:
+          type: string
+          enum: [neural_hybrid, neural_pure, search, heuristic, baseline]
+        description:
+          type: string
+
+    CoordDTO:
+      type: object
+      required: [action, x, y, z]
+      properties:
+        action:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Column index `4*y + x`
+        x:
+          type: integer
+          minimum: 0
+          maximum: 3
+        y:
+          type: integer
+          minimum: 0
+          maximum: 3
+        z:
+          type: integer
+          minimum: 0
+          maximum: 3
+        player:
+          type: integer
+          enum: [1, 2]
+          description: 1 = White, 2 = Black
+        move_number:
+          type: integer
+          minimum: 1
+          maximum: 64
+
+    GameSummaryDTO:
+      type: object
+      required: [game_id, name, white_name, black_name, status, winner, move_count, current_player]
+      properties:
+        game_id:
+          type: string
+          example: match-alpha-1
+        name:
+          type: string
+          example: Qualifying Match #1 — MyBot vs TTT3DNet
+        white_name:
+          type: string
+          example: MyExternalBot (White)
+        black_name:
+          type: string
+          example: TTT3DNet (Black)
+        opponent_agent:
+          type: string
+          example: ttt3dnet
+        status:
+          type: string
+          enum: [ONGOING, WHITE_WON, BLACK_WON, DRAW]
+        winner:
+          type: integer
+          enum: [0, 1, 2]
+        move_count:
+          type: integer
+          minimum: 0
+          maximum: 64
+        current_player:
+          type: integer
+          enum: [1, 2]
+
+    GameStateDTO:
+      type: object
+      required:
+        - game_id
+        - name
+        - white_name
+        - black_name
+        - white_bitboard
+        - black_bitboard
+        - current_player
+        - status
+        - status_code
+        - winner
+        - win_line_mask
+        - win_line_index
+        - valid_moves_mask
+        - valid_actions
+        - move_count
+        - board
+        - canonical_tensor
+        - history
+      properties:
+        game_id:
+          type: string
+          example: match-alpha-1
+        name:
+          type: string
+          description: Human-readable match title/name
+          example: Qualifying Match #1 — MyBot vs TTT3DNet
+        white_name:
+          type: string
+          example: MyExternalBot
+        black_name:
+          type: string
+          example: TTT3DNet
+        opponent_agent:
+          type: string
+          description: Optional configured server-side AI model that automatically replies to moves
+          example: ttt3dnet
+        white_bitboard:
+          type: integer
+          description: 64-bit unsigned integer bitboard for White (`bit = 16*z + 4*y + x`)
+        black_bitboard:
+          type: integer
+          description: 64-bit unsigned integer bitboard for Black (`bit = 16*z + 4*y + x`)
+        current_player:
+          type: integer
+          enum: [1, 2]
+          description: 1 = White, 2 = Black
+        status:
+          type: string
+          enum: [ONGOING, WHITE_WON, BLACK_WON, DRAW]
+        status_code:
+          type: integer
+          enum: [0, 1, 2, 3]
+        winner:
+          type: integer
+          enum: [0, 1, 2]
+        win_line_mask:
+          type: integer
+        win_line_index:
+          type: integer
+          description: Index in `0..75` when won, or `-1` if ongoing/draw
+        win_line_category:
+          type: string
+        win_line_coords:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoordDTO"
+        valid_moves_mask:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: 16-bit bitmask where bit `a` is 1 if column `a` (`0..15`) is not full
+        valid_actions:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 15
+        move_count:
+          type: integer
+          minimum: 0
+          maximum: 64
+        board:
+          type: array
+          description: 3D array indexed as `board[z][y][x]` with values `0` (empty), `1` (White), `2` (Black)
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: integer
+        canonical_tensor:
+          type: array
+          description: Flattened `(3, 4, 4, 4)` length-192 canonical input tensor (`[MyPieces, OpponentPieces, GravitySurface]`)
+          items:
+            type: integer
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoordDTO"
+
+    CreateGameRequest:
+      type: object
+      properties:
+        game_id:
+          type: string
+          description: Optional custom game identifier slug (auto-generated if omitted)
+          example: my-algo-match-01
+        name:
+          type: string
+          description: Human-friendly name/title for the match (shown in 3D Replay UI and game listings)
+          example: Championship Game 1 — MyBot vs TTT3DNet
+        white_name:
+          type: string
+          example: MyLaptopBot (White)
+        black_name:
+          type: string
+          example: TTT3DNet (Black)
+        opponent_agent:
+          type: string
+          description: Optional built-in AI model (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`) to play against automatically
+          enum: ["", ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+        human_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the external player controls when `opponent_agent` is set (`1` = White, `2` = Black; if `2`, the AI makes the opening White move immediately)
+
+    UpdateGameRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: New match name/title
+        white_name:
+          type: string
+        black_name:
+          type: string
+        opponent_agent:
+          type: string
+          description: Built-in AI model (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`, or `""` to disable auto-reply)
+
+    MoveRequest:
+      type: object
+      properties:
+        player:
+          type: integer
+          enum: [1, 2]
+          description: Optional turn verification (`1` = White, `2` = Black)
+        action:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Column action `a = 4*y + x` in `0..15`
+        use_coords:
+          type: boolean
+          description: Set to `true` to specify column via `(x, y)` coordinates instead of `action`
+        x:
+          type: integer
+          minimum: 0
+          maximum: 3
+        y:
+          type: integer
+          minimum: 0
+          maximum: 3
+        opponent_agent:
+          type: string
+          description: Optional built-in AI model (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`) to automatically reply after this move
+        auto_reply:
+          type: boolean
+          description: Optional override to enable/disable automatic AI reply when `opponent_agent` is configured on the game (defaults to `true` if `opponent_agent` is set)
+
+    MoveResponseDTO:
+      type: object
+      required: [state, last_move, reward, done]
+      properties:
+        state:
+          $ref: "#/components/schemas/GameStateDTO"
+        last_move:
+          $ref: "#/components/schemas/CoordDTO"
+        ai_move:
+          $ref: "#/components/schemas/CoordDTO"
+          description: Present when an AI opponent automatically replied to the submitted move
+        reward:
+          type: number
+          format: float
+        done:
+          type: boolean
+
+    AIMoveRequest:
+      type: object
+      properties:
+        agent:
+          type: string
+          description: Built-in AI model identifier (defaults to `ttt3dnet` or session's `opponent_agent` if omitted)
+          enum: [ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+          example: ttt3dnet
+
+    PresetRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [win, draw]
+        line_index:
+          type: integer
+          minimum: 0
+          maximum: 75
+        winner:
+          type: integer
+          enum: [1, 2]
+
+    RunMatchRequest:
+      type: object
+      properties:
+        game_id:
+          type: string
+        name:
+          type: string
+          description: Human-readable match title/name
+          example: Bot Showdown — TTT3DNet vs MCTS
+        white_name:
+          type: string
+        black_name:
+          type: string
+        white_bot_url:
+          type: string
+          description: Remote webhook URL for White (`POST`s `GameStateDTO`, expects `{"action": 0..15}`). Optional if `white_agent` is set.
+        black_bot_url:
+          type: string
+          description: Remote webhook URL for Black (`POST`s `GameStateDTO`, expects `{"action": 0..15}`). Optional if `black_agent` is set.
+        white_agent:
+          type: string
+          description: Built-in AI model for White (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`) if `white_bot_url` is not used.
+        black_agent:
+          type: string
+          description: Built-in AI model for Black (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`) if `black_bot_url` is not used.
+        timeout_ms:
+          type: integer
+          default: 5000

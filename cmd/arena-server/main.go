@@ -16,7 +16,16 @@ func main() {
 	httpAddr := flag.String("http-addr", "", "HTTP listen address for Kubernetes Ingress deployment (e.g. :8080)")
 	httpsAddr := flag.String("https-addr", "127.0.0.1:8443", "HTTPS listen address for standalone TLS Battle API and 3D Web UI")
 	grpcEndpoint := flag.String("grpc-endpoint", "unix:///tmp/3t3d_train.sock", "Local gRPC listen endpoint (empty to disable)")
+	mcpStdio := flag.Bool("mcp-stdio", false, "Run Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio")
 	flag.Parse()
+
+	if *mcpStdio {
+		arena := httpserver.NewArenaServer(nil)
+		if err := arena.ServeMCPStdio(os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("MCP stdio error: %v", err)
+		}
+		return
+	}
 
 	if *grpcEndpoint != "" {
 		_, resolvedGRPC, stopGRPC, err := grpcserver.StartServer(*grpcEndpoint)

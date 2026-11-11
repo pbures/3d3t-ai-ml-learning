@@ -335,4 +335,54 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 			t.Fatalf("expected completed match with >= 7 moves, got status=%s moves=%d", matchDTO.Status, matchDTO.MoveCount)
 		}
 	})
+
+	// -------------------------------------------------------------------------
+	// Phase 5c: OpenAPI 3.1 Spec, Named Matches & Programmatic AI Auto-Reply
+	// -------------------------------------------------------------------------
+	t.Run("Phase_5c_OpenAPI_NamedMatches_And_Programmatic_AI_Play", func(t *testing.T) {
+		// 1. Verify OpenAPI 3.1 JSON spec & Models discovery endpoint
+		var spec map[string]interface{}
+		if c := getJSON(t, client, baseURL+"/openapi.json", &spec); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on /openapi.json, got %d", c)
+		}
+		if spec["openapi"] != "3.1.0" {
+			t.Fatalf("expected openapi=3.1.0, got %v", spec["openapi"])
+		}
+
+		var modelsPayload struct {
+			Models []ModelInfoDTO `json:"models"`
+		}
+		if c := getJSON(t, client, baseURL+"/api/v1/models", &modelsPayload); c != http.StatusOK || len(modelsPayload.Models) != 6 {
+			t.Fatalf("expected 6 built-in models from /api/v1/models, got code=%d len=%d", c, len(modelsPayload.Models))
+		}
+
+		// 2. Create a named match where external player is Black (human_player=2) vs ttt3dnet
+		// The server AI should immediately make White's opening move (move_count == 1)
+		var blackStart GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/games", CreateGameRequest{
+			GameID:        "named-match-black",
+			Name:          "Grand Finals Game 1 — External Algo vs TTT3DNet",
+			BlackName:     "ExternalAlgo",
+			OpponentAgent: "ttt3dnet",
+			HumanPlayer:   2,
+		}, &blackStart); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created, got %d", c)
+		}
+		if blackStart.Name != "Grand Finals Game 1 — External Algo vs TTT3DNet" || blackStart.MoveCount != 1 || blackStart.CurrentPlayer != 2 {
+			t.Fatalf("expected AI to make opening White move on human_player=2, got %+v", blackStart)
+		}
+
+		// 3. Submit external player's Black move and verify automatic AI White reply (ai_move != nil, move_count == 3)
+		act := int(blackStart.ValidActions[0])
+		var moveResp MoveResponseDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/games/named-match-black/move", MoveRequest{
+			Player: 2,
+			Action: &act,
+		}, &moveResp); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on move with auto AI reply, got %d", c)
+		}
+		if moveResp.AIMove == nil || moveResp.State.MoveCount != 3 || moveResp.State.CurrentPlayer != 2 {
+			t.Fatalf("expected automatic AI reply (move_count=3, current_player=2), got %+v", moveResp)
+		}
+	})
 }

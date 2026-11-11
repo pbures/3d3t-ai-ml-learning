@@ -194,10 +194,17 @@
         <button id="btn-new-game" class="primary">+ New</button>
         <button id="btn-reset-game">Reset</button>
       </div>
-      <div class="row" style="margin-bottom:0; flex-wrap:wrap;">
-        <button id="btn-preset-diag3d" title="Load a 3D Space Diagonal win replay">3D Diag Win</button>
-        <button id="btn-preset-ortho" title="Load an Orthogonal X-Line win replay">Ortho Win</button>
-        <button id="btn-preset-draw" title="Load a full 64-move Draw game replay">64-Move Draw</button>
+      <div class="row">
+        <input type="text" id="match-name-input" placeholder="Match name (e.g. Bot Finals #1)" style="flex:1; background:var(--bg); color:var(--text); border:1px solid var(--panel-border); border-radius:6px; padding:6px 8px; font-size:0.82rem;" />
+        <button id="btn-rename-game" title="Rename current match">Rename</button>
+      </div>
+      <div class="row" style="margin-bottom:0; flex-wrap:wrap; justify-content:space-between;">
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button id="btn-preset-diag3d" title="Load a 3D Space Diagonal win replay">3D Diag Win</button>
+          <button id="btn-preset-ortho" title="Load an Orthogonal X-Line win replay">Ortho Win</button>
+          <button id="btn-preset-draw" title="Load a full 64-move Draw game replay">64-Move Draw</button>
+        </div>
+        <a href="/docs" target="_blank" style="color:var(--accent); font-size:0.78rem; text-decoration:none; align-self:center;">OpenAPI Docs ↗</a>
       </div>
     </div>
 
@@ -502,7 +509,8 @@
       (data.games || []).forEach(g => {
         const opt = document.createElement('option');
         opt.value = g.game_id;
-        opt.textContent = `${g.game_id} (${g.status}, ${g.move_count} moves)`;
+        const label = g.name && g.name !== g.game_id ? `${g.name} [${g.game_id}]` : g.game_id;
+        opt.textContent = `${label} (${g.status}, ${g.move_count} moves)`;
         if (g.game_id === selectedId) opt.selected = true;
         sel.appendChild(opt);
       });
@@ -513,6 +521,8 @@
       const res = await fetch(`/api/v1/games/${encodeURIComponent(gameId)}`);
       if (!res.ok) return;
       currentGame = await res.json();
+      const nameInput = document.getElementById('match-name-input');
+      if (nameInput) nameInput.value = currentGame.name || currentGame.game_id || '';
       await refreshGameList(currentGame.game_id);
       const total = (currentGame.history || []).length;
       setReplayPly(jumpToStart ? 0 : total);
@@ -588,10 +598,32 @@
     // Event Listeners
     document.getElementById('game-select').onchange = (e) => loadGame(e.target.value);
     document.getElementById('btn-new-game').onclick = async () => {
-      const res = await fetch('/api/v1/games', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const nameInput = document.getElementById('match-name-input');
+      const customName = nameInput ? nameInput.value.trim() : '';
+      const res = await fetch('/api/v1/games', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: customName })
+      });
       if (res.ok) {
         const g = await res.json();
         await loadGame(g.game_id);
+      }
+    };
+    document.getElementById('btn-rename-game').onclick = async () => {
+      if (!currentGame) return;
+      const nameInput = document.getElementById('match-name-input');
+      const customName = nameInput ? nameInput.value.trim() : '';
+      if (!customName) return;
+      const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: customName })
+      });
+      if (res.ok) {
+        currentGame = await res.json();
+        await refreshGameList(currentGame.game_id);
+        updateHUDAndMoveList();
       }
     };
     document.getElementById('btn-reset-game').onclick = async () => {
