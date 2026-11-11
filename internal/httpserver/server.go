@@ -220,12 +220,42 @@ func NewArenaServer(botHTTPClient *http.Client) *ArenaServer {
 	}
 	s.sessions["default"] = &gameSession{
 		id:        "default",
-		name:      "default",
+		name:      "CW - default",
 		whiteName: "Player 1 (White)",
 		blackName: "Player 2 (Black)",
 		game:      engine.NewGame(),
 	}
 	return s
+}
+
+func isServerWhitePlayer(whiteName, oppAgentName string, humanPlayer uint8) bool {
+	if oppAgentName != "" && humanPlayer == uint8(engine.PlayerBlack) {
+		return true
+	}
+	wLower := strings.ToLower(strings.TrimSpace(whiteName))
+	if strings.HasPrefix(wLower, "ai ") || strings.Contains(wLower, "server") {
+		return true
+	}
+	for _, m := range BuiltinModels {
+		if wLower == m.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func formatMatchName(rawName string, serverStartsWhite bool) string {
+	clean := strings.TrimSpace(rawName)
+	for _, p := range []string{"SW - ", "CW - ", "SW ", "CW "} {
+		if strings.HasPrefix(clean, p) {
+			clean = strings.TrimSpace(clean[len(p):])
+			break
+		}
+	}
+	if serverStartsWhite {
+		return "SW - " + clean
+	}
+	return "CW - " + clean
 }
 
 func buildStateDTO(sess *gameSession) GameStateDTO {
@@ -506,6 +536,8 @@ func (s *ArenaServer) handleGamesRoot(w http.ResponseWriter, r *http.Request) {
 				blackName = "Player 2 (Black)"
 			}
 		}
+		serverStartsWhite := isServerWhitePlayer(whiteName, oppAgentName, req.HumanPlayer)
+		matchName = formatMatchName(matchName, serverStartsWhite)
 
 		g := engine.NewGame()
 		// If external player chose Black (2) and an opponent model is configured, let the AI make White's opening move
@@ -580,7 +612,7 @@ func (s *ArenaServer) handleGameByID(w http.ResponseWriter, r *http.Request) {
 		if !exists {
 			sess = &gameSession{
 				id:        gameID,
-				name:      gameID,
+				name:      formatMatchName(gameID, false),
 				whiteName: "Player 1 (White)",
 				blackName: "Player 2 (Black)",
 				game:      engine.NewGame(),
@@ -648,12 +680,6 @@ func (s *ArenaServer) handleUpdateGame(w http.ResponseWriter, r *http.Request, g
 		writeError(w, http.StatusNotFound, fmt.Sprintf("game %q not found", gameID))
 		return
 	}
-	if req.Name != nil {
-		n := strings.TrimSpace(*req.Name)
-		if n != "" {
-			sess.name = n
-		}
-	}
 	if req.WhiteName != nil {
 		wn := strings.TrimSpace(*req.WhiteName)
 		if wn != "" {
@@ -668,6 +694,20 @@ func (s *ArenaServer) handleUpdateGame(w http.ResponseWriter, r *http.Request, g
 	}
 	if hasOppUpdate {
 		sess.opponentAgent = validatedOpp
+	}
+	if req.Name != nil {
+		n := strings.TrimSpace(*req.Name)
+		if n != "" {
+			if strings.HasPrefix(n, "SW - ") || strings.HasPrefix(n, "CW - ") {
+				sess.name = n
+			} else {
+				serverStartsWhite := isServerWhitePlayer(sess.whiteName, sess.opponentAgent, 0)
+				sess.name = formatMatchName(n, serverStartsWhite)
+			}
+		}
+	} else if req.WhiteName != nil {
+		serverStartsWhite := isServerWhitePlayer(sess.whiteName, sess.opponentAgent, 0)
+		sess.name = formatMatchName(sess.name, serverStartsWhite)
 	}
 	dto := buildStateDTO(sess)
 	s.mu.Unlock()
@@ -968,7 +1008,7 @@ func (s *ArenaServer) handlePreset(w http.ResponseWriter, r *http.Request, gameI
 	if !exists {
 		sess = &gameSession{
 			id:        gameID,
-			name:      gameID,
+			name:      formatMatchName(gameID, false),
 			whiteName: "Player 1 (White)",
 			blackName: "Player 2 (Black)",
 			game:      engine.NewGame(),
@@ -1046,6 +1086,8 @@ func (s *ArenaServer) handleRunMatch(w http.ResponseWriter, r *http.Request) {
 			blackName = "Remote Bot (Black)"
 		}
 	}
+	serverStartsWhite := (whiteAgentName != "" && whiteURL == "") || isServerWhitePlayer(whiteName, whiteAgentName, 0)
+	matchName = formatMatchName(matchName, serverStartsWhite)
 
 	sess := &gameSession{
 		id:        gameID,

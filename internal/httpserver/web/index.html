@@ -501,6 +501,19 @@
     }
 
     // --- API Calls ---
+    const BUILTIN_MODELS = new Set(['ttt3dnet', 'ttt3dnet-pure', 'mcts', 'alphabeta', 'heuristic', 'random']);
+
+    function formatMatchPrefix(g) {
+      const rawName = (g.name || g.game_id || '').trim();
+      if (rawName.startsWith('SW - ') || rawName.startsWith('CW - ')) {
+        return rawName;
+      }
+      const wLower = (g.white_name || '').trim().toLowerCase();
+      const isServerWhite = BUILTIN_MODELS.has(wLower) || wLower.startsWith('ai ') || wLower.includes('server');
+      const clean = rawName.replace(/^(SW|CW)\s*-?\s*/, '');
+      return `${isServerWhite ? 'SW' : 'CW'} - ${clean}`;
+    }
+
     async function refreshGameList(selectedId) {
       const res = await fetch('/api/v1/games');
       const data = await res.json();
@@ -509,7 +522,8 @@
       (data.games || []).forEach(g => {
         const opt = document.createElement('option');
         opt.value = g.game_id;
-        const label = g.name && g.name !== g.game_id ? `${g.name} [${g.game_id}]` : g.game_id;
+        const formattedName = formatMatchPrefix(g);
+        const label = formattedName !== g.game_id ? `${formattedName} [${g.game_id}]` : formattedName;
         opt.textContent = `${label} (${g.status}, ${g.move_count} moves)`;
         if (g.game_id === selectedId) opt.selected = true;
         sel.appendChild(opt);
@@ -522,7 +536,7 @@
       if (!res.ok) return;
       currentGame = await res.json();
       const nameInput = document.getElementById('match-name-input');
-      if (nameInput) nameInput.value = currentGame.name || currentGame.game_id || '';
+      if (nameInput) nameInput.value = formatMatchPrefix(currentGame);
       await refreshGameList(currentGame.game_id);
       const total = (currentGame.history || []).length;
       setReplayPly(jumpToStart ? 0 : total);
