@@ -582,17 +582,32 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 	}
 
 	// 6. Hybrid Neural Policy + 1-Ply Value + 3-Ply Bitboard Tactical Search over candidate moves
+	hasNonCeilingCandidate := false
+	for _, act := range candidates {
+		if z, ok := g.LandingZ(act); ok && z < 3 {
+			hasNonCeilingCandidate = true
+			break
+		}
+	}
+
 	ab := AlphaBetaAgent{MaxDepth: 3}
 	bestCandidate := candidates[0]
 	bestCombined := float32(-1e9)
 	for _, act := range candidates {
+		zLand, _ := g.LandingZ(act)
 		clone := g.Clone()
 		_, _ = clone.ApplyMove(act)
 		_, oppVal := a.model.PredictGame(clone)
 		myNextVal := -oppVal
 		abVal := -ab.negamax(clone, 2, -1_000_000, 1_000_000)
-		threatBonus := float32(0.15) * float32(len(FindImmediateWinningActions(clone, me)))
-		combined := probs[act] + 0.5*myNextVal + threatBonus + 0.008*float32(abVal)
+		immThreats := len(FindImmediateWinningActions(clone, me))
+		threatBonus := float32(0.15) * float32(immThreats)
+		// P8 Anti-Passivity: avoid burning safe ceiling moves (z=3) unless creating an immediate threat
+		var ceilingPenalty float32
+		if hasNonCeilingCandidate && zLand == 3 && immThreats == 0 {
+			ceilingPenalty = 0.35
+		}
+		combined := probs[act] + 0.5*myNextVal + threatBonus + 0.008*float32(abVal) - ceilingPenalty
 		if combined > bestCombined {
 			bestCombined = combined
 			bestCandidate = act
