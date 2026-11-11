@@ -65,6 +65,11 @@ def _precompute_76_win_masks() -> Tuple[int, ...]:
 
 WIN_LINE_MASKS: Tuple[int, ...] = _precompute_76_win_masks()
 
+SEVEN_LINE_MASK: int = 0
+for _b in range(64):
+    if sum(1 for _m in WIN_LINE_MASKS if (_m & (1 << _b)) != 0) == 7:
+        SEVEN_LINE_MASK |= 1 << _b
+
 
 def check_bitboard_win(bitboard: int) -> bool:
     """Returns True if `bitboard` contains any of the 76 4-in-a-row masks."""
@@ -83,6 +88,28 @@ def landing_bit_for_action(occupied_mask: int, action: int) -> Optional[int]:
     return None
 
 
+def surface_bitmask(occupied_mask: int) -> int:
+    """Returns a 64-bit bitmask of all currently playable landing cells across the 16 columns."""
+    surface = 0
+    for a in range(NUM_ACTIONS):
+        lbit = landing_bit_for_action(occupied_mask, a)
+        if lbit is not None:
+            surface |= 1 << lbit
+    return surface
+
+
+def threat_cells_bitmask(my_bb: int, opp_bb: int) -> int:
+    """Returns a 64-bit bitmask of all empty cells (0..63) where `my_bb` has 3-in-a-row and `opp_bb` has 0."""
+    threats = 0
+    for mask in WIN_LINE_MASKS:
+        if (opp_bb & mask) != 0:
+            continue
+        my_bits = my_bb & mask
+        if my_bits.bit_count() == 3:
+            threats |= mask & (~my_bits)
+    return threats
+
+
 def find_immediate_wins(player_bb: int, occupied_mask: int) -> List[int]:
     """Returns all legal column actions (0..15) that immediately form a 4-in-a-row for `player_bb`."""
     wins: List[int] = []
@@ -94,20 +121,90 @@ def find_immediate_wins(player_bb: int, occupied_mask: int) -> List[int]:
 
 
 def has_unstoppable_threat(attacker_bb: int, defender_bb: int, occupied_mask: int) -> bool:
-    """Returns True if `attacker_bb` has an unstoppable 1-ply win threat (2+ winning columns or a stacked vertical fork)."""
-    threats = find_immediate_wins(attacker_bb, occupied_mask)
-    if not threats:
+    """Returns True if `attacker_bb` has an unstoppable threat (2+ immediate wins or any stacked vertical fork z & z+1)."""
+    my_threats = threat_cells_bitmask(attacker_bb, defender_bb)
+    if my_threats == 0:
         return False
-    if len(threats) >= 2:
+    opp_threats = threat_cells_bitmask(defender_bb, attacker_bb)
+    surf = surface_bitmask(occupied_mask)
+    if (my_threats & surf).bit_count() >= 2:
         return True
-    blk = threats[0]
-    b_bit = landing_bit_for_action(occupied_mask, blk)
-    if b_bit is None:
-        return False
-    if check_bitboard_win(defender_bb | (1 << b_bit)):
-        return False
-    occ_after = occupied_mask | (1 << b_bit)
-    return len(find_immediate_wins(attacker_bb, occ_after)) > 0
+    # Any two vertically consecutive 3-in-a-row threats (z and z+1 in the same column, h <= z)
+    # where the lower cell does not also complete a win for the defender is an unstoppable vertical fork.
+    if (my_threats & (my_threats >> 16) & (~opp_threats)) != 0:
+        return True
+    return False
+
+
+def evaluate_bitboard_position(my_bb: int, opp_bb: int) -> int:
+    """Computes the 76-line + suspended-threat + stacked-fork positional score from `my_bb`'s perspective."""
+    occ = my_bb | opp_bb
+    surface = surface_bitmask(occ)
+    my_threats = threat_cells_bitmask(my_bb, opp_bb)
+    opp_threats = threat_cells_bitmask(opp_bb, my_bb)
+
+    my_imm = (my_threats & surface).bit_count()
+    opp_imm = (opp_threats & surface).bit_count()
+
+    score = 0
+    my_stacked = my_threats & (my_threats >> 16) & (~opp_threats)
+    opp_stacked = opp_threats & (opp_threats >> 16) & (~my_threats)
+    if my_imm >= 2 or my_stacked != 0:
+        score += 2500
+    if opp_imm >= 2 or opp_stacked != 0:
+        score -= 2600
+
+    score += 4 * ((my_bb & SEVEN_LINE_MASK).bit_count() - (opp_bb & SEVEN_LINE_MASK).bit_count())
+
+    my_susp = my_threats & (~surface)
+    opp_susp = opp_threats & (~surface)
+    if (my_susp | opp_susp) != 0:
+        for col in range(NUM_ACTIONS):
+            lowest_owner = 0
+            for z in range(1, 4):
+                bit = 1 << (col + 16 * z)
+                m_has = (my_susp & bit) != 0
+                o_has = (opp_susp & bit) != 0
+                if not m_has and not o_has:
+                    continue
+                if lowest_owner == 0:
+                    if m_has and not o_has:
+                        lowest_owner = 1
+                        score += 55
+                    elif o_has and not m_has:
+                        lowest_owner = 2
+                        score -= 60
+                    else:
+                        lowest_owner = 3
+                elif lowest_owner == 1 and m_has:
+                    score += 35
+                elif lowest_owner == 2 and o_has:
+                    score -= 40
+
+    for mask in WIN_LINE_MASKS:
+        my_bits = my_bb & mask
+        opp_bits = opp_bb & mask
+        if my_bits != 0 and opp_bits != 0:
+            continue
+        if my_bits != 0:
+            cnt = my_bits.bit_count()
+            if cnt == 1:
+                score += 1
+            elif cnt == 2:
+                score += 8
+            elif cnt == 3:
+                missing = mask & (~my_bits)
+                score += 65 if (missing & surface) != 0 else 32
+        elif opp_bits != 0:
+            cnt = opp_bits.bit_count()
+            if cnt == 1:
+                score -= 1
+            elif cnt == 2:
+                score -= 9
+            elif cnt == 3:
+                missing = mask & (~opp_bits)
+                score -= 80 if (missing & surface) != 0 else 36
+    return score
 
 
 def _build_canonical_from_bitboards(my_bb: int, opp_bb: int) -> Tuple[np.ndarray, int]:
@@ -300,17 +397,19 @@ class NeuralArenaBot:
         if non_fork_vulnerable:
             candidates = non_fork_vulnerable
 
-        # 6. Batched 1-ply Neural Value + Policy evaluation over candidate moves
-        # Combines TTT3DNet policy prior pi(a|s) with 1-ply value lookahead -v(s') in a single batched forward pass
+        # 6. Batched 1-ply Neural Value + Policy + 2-ply Bitboard Tactical evaluation over candidate moves
         next_obs_list: List[np.ndarray] = []
         threat_bonuses: List[float] = []
         for a in candidates:
             lbit = landing_bit_for_action(occupied, a)
             assert lbit is not None
             next_my_bb = my_bb | (1 << lbit)
+            next_occ = occupied | (1 << lbit)
             next_obs, _ = _build_canonical_from_bitboards(opp_bb, next_my_bb)
             next_obs_list.append(next_obs)
-            threat_bonuses.append(0.15 * len(find_immediate_wins(next_my_bb, occupied | (1 << lbit))))
+            imm_bonus = 0.15 * len(find_immediate_wins(next_my_bb, next_occ))
+            pos_score = evaluate_bitboard_position(next_my_bb, opp_bb)
+            threat_bonuses.append(imm_bonus + 0.008 * float(pos_score))
 
         was_training = self.model.training
         self.model.eval()

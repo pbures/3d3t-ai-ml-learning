@@ -15,6 +15,7 @@ from .arena_bot import (
     NeuralArenaBot,
     _build_canonical_from_bitboards,
     check_bitboard_win,
+    evaluate_bitboard_position,
     find_immediate_wins,
     has_unstoppable_threat,
     landing_bit_for_action,
@@ -477,39 +478,8 @@ _CELL_LINE_COUNTS: Tuple[int, ...] = tuple(
 
 
 def _evaluate_bitboard_heuristic(my_bb: int, opp_bb: int) -> int:
-    """Computes the 76-line positional score from `my_bb`'s perspective (mirrors Go EvaluateBoard)."""
-    occ = my_bb | opp_bb
-    surface = 0
-    for a in range(NUM_ACTIONS):
-        lbit = landing_bit_for_action(occ, a)
-        if lbit is not None:
-            surface |= 1 << lbit
-
-    score = 0
-    for mask in WIN_LINE_MASKS:
-        my_bits = my_bb & mask
-        opp_bits = opp_bb & mask
-        if my_bits != 0 and opp_bits != 0:
-            continue
-        if my_bits != 0:
-            cnt = my_bits.bit_count()
-            if cnt == 1:
-                score += 1
-            elif cnt == 2:
-                score += 6
-            elif cnt == 3:
-                missing = mask & (~my_bits)
-                score += 65 if (missing & surface) != 0 else 25
-        elif opp_bits != 0:
-            cnt = opp_bits.bit_count()
-            if cnt == 1:
-                score -= 1
-            elif cnt == 2:
-                score -= 6
-            elif cnt == 3:
-                missing = mask & (~opp_bits)
-                score -= 80 if (missing & surface) != 0 else 28
-    return score
+    """Computes the 76-line + suspended-threat positional score from `my_bb`'s perspective."""
+    return evaluate_bitboard_position(my_bb, opp_bb)
 
 
 def _compute_tactical_teacher_policy(

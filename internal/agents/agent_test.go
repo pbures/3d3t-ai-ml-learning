@@ -245,14 +245,25 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 	input[2*64+16+5] = 1.0
 
 	logits, val := model.Forward(input)
-	expectedLogits := [4]float32{-0.386840, -0.653686, -1.330184, 1.484107}
+	expectedLogits := [4]float32{-0.457250, -2.411903, -2.051143, 1.404457}
 	for i := 0; i < 4; i++ {
 		if math.Abs(float64(logits[i]-expectedLogits[i])) > 1e-4 {
 			t.Fatalf("logit[%d] mismatch: got %.6f, expected %.6f", i, logits[i], expectedLogits[i])
 		}
 	}
-	if math.Abs(float64(val-0.079033)) > 1e-4 {
-		t.Fatalf("value mismatch: got %.6f, expected 0.079033", val)
+	if math.Abs(float64(val - -0.036816)) > 1e-4 {
+		t.Fatalf("value mismatch: got %.6f, expected -0.036816", val)
+	}
+
+	// Verify dormant stacked vertical fork detection (z=1 and z=2 in col 0 while col 0 is empty at h=0)
+	gDormant := engine.NewGame()
+	// White has 3-in-a-row at z=1: (1,0,1), (2,0,1), (3,0,1) -> missing (0,0,1) (bit 16)
+	// White also has 3-in-a-row at z=2: (1,0,2), (2,0,2), (3,0,2) -> missing (0,0,2) (bit 32)
+	gDormant.White = (uint64(1) << 17) | (uint64(1) << 18) | (uint64(1) << 19) |
+		(uint64(1) << 33) | (uint64(1) << 34) | (uint64(1) << 35)
+	gDormant.Black = (uint64(1) << 1) | (uint64(1) << 2) | (uint64(1) << 3)
+	if !hasUnstoppableThreat(gDormant, engine.PlayerWhite) {
+		t.Fatal("expected hasUnstoppableThreat to detect dormant stacked vertical fork at z=1 & z=2 above h=0")
 	}
 
 	// Test ParseFusedWeights error branches

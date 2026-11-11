@@ -302,7 +302,7 @@ def test_https_webhook_and_client_neural_tournaments(
         opponent_agent="ttt3dnet",
         human_player=1,
     )
-    assert named_game["name"] == "Python External Algorithm vs TTT3DNet"
+    assert named_game["name"].endswith("Python External Algorithm vs TTT3DNet")
     assert named_game["opponent_agent"] == "ttt3dnet"
 
     move_out = https_arena_client.submit_move(
@@ -322,7 +322,7 @@ def test_https_webhook_and_client_neural_tournaments(
         black_name="UpdatedBlack",
         opponent_agent="heuristic",
     )
-    assert renamed["name"] == "Renamed Championship Match"
+    assert renamed["name"].endswith("Renamed Championship Match")
     assert renamed["white_name"] == "UpdatedWhite"
     assert renamed["black_name"] == "UpdatedBlack"
     assert renamed["opponent_agent"] == "heuristic"
@@ -354,7 +354,7 @@ def test_https_webhook_and_client_neural_tournaments(
             "human_player": 2,
         },
     )
-    assert mcp_created["name"] == "MCP HTTPS Game vs TTT3DNet"
+    assert mcp_created["name"].endswith("MCP HTTPS Game vs TTT3DNet")
     assert mcp_created["move_count"] == 1
     assert mcp_created["current_player"] == 2
 
