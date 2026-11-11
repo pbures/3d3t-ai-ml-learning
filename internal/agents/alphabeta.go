@@ -12,6 +12,53 @@ const (
 	ScoreLoss = -100000
 )
 
+// SevenLineMask has bits set at the 16 cells of the 4x4x4 cube that belong to 7 winning lines
+// (the 8 outer corners and the 8 inner 2x2x2 core cells).
+var SevenLineMask uint64
+
+// CenterZ0Z1Mask marks the 4 central columns (B2=5, C2=6, B3=9, C3=10) on layers z=0 and z=1.
+const CenterZ0Z1Mask uint64 = 0x0660_0660
+
+// planarLineMasks16 stores the 10 2D winning line column masks (4 rows, 4 cols, 2 diagonals) in a 4x4 plane.
+var planarLineMasks16 = [10]uint16{
+	0x000F, 0x00F0, 0x0F00, 0xF000, // 4 rows
+	0x1111, 0x2222, 0x4444, 0x8888, // 4 cols
+	0x8421, 0x1248, // 2 diagonals
+}
+
+func init() {
+	for bit := uint8(0); bit < engine.GridCells; bit++ {
+		if CellLineCounts[bit] == 7 {
+			SevenLineMask |= uint64(1) << bit
+		}
+	}
+}
+
+// ThreatCellsMask returns a 64-bit bitmask of all currently empty cells (0..63) where `player`
+// already occupies the other 3 cells of a winning line (both immediate at z=h and suspended at z>h).
+func ThreatCellsMask(g *engine.Game, player engine.Player) uint64 {
+	if g == nil {
+		return 0
+	}
+	myBoard := g.White
+	oppBoard := g.Black
+	if player == engine.PlayerBlack {
+		myBoard = g.Black
+		oppBoard = g.White
+	}
+	var threats uint64
+	for _, mask := range engine.WinMasks {
+		if (oppBoard & mask) != 0 {
+			continue
+		}
+		myBits := myBoard & mask
+		if bits.OnesCount64(myBits) == 3 {
+			threats |= (mask &^ myBits)
+		}
+	}
+	return threats
+}
+
 // EvaluateBoard computes a heuristic score for `g` from the perspective of `perspective` (PlayerWhite or PlayerBlack).
 func EvaluateBoard(g *engine.Game, perspective engine.Player) int {
 	if g.Status != engine.StatusOngoing {
@@ -24,6 +71,7 @@ func EvaluateBoard(g *engine.Game, perspective engine.Player) int {
 		return 0 // Draw
 	}
 
+	opp := perspective.Opponent()
 	myBoard := g.White
 	oppBoard := g.Black
 	if perspective == engine.PlayerBlack {
@@ -32,7 +80,102 @@ func EvaluateBoard(g *engine.Game, perspective engine.Player) int {
 	}
 
 	surface := LandingMask(g)
+	myThreats := ThreatCellsMask(g, perspective)
+	oppThreats := ThreatCellsMask(g, opp)
+
+	// Turn-aware immediate win detection
+	myImmCount := bits.OnesCount64(myThreats & surface)
+	oppImmCount := bits.OnesCount64(oppThreats & surface)
+	if g.CurrentPlayer == perspective && myImmCount > 0 {
+		return ScoreWin - int(g.MoveCount+1)
+	}
+	if g.CurrentPlayer == opp && oppImmCount > 0 {
+		return ScoreLoss + int(g.MoveCount+1)
+	}
+
 	score := 0
+
+	// Unstoppable multi-column or dormant stacked vertical forks (z and z+1 in the same column, h <= z)
+	myStacked := myThreats & (myThreats >> 16) &^ oppThreats
+	oppStacked := oppThreats & (oppThreats >> 16) &^ myThreats
+	if myImmCount >= 2 || myStacked != 0 {
+		score += 2500
+	}
+	if oppImmCount >= 2 || oppStacked != 0 {
+		score -= 2600
+	}
+
+	// 7-line strategic cell control (outer corners + inner 2x2x2 core) and P8 center priority (B2,B3,C2,C3 on z=0,1)
+	score += 4 * (bits.OnesCount64(myBoard&SevenLineMask) - bits.OnesCount64(oppBoard&SevenLineMask))
+	score += 6 * (bits.OnesCount64(myBoard&CenterZ0Z1Mask) - bits.OnesCount64(oppBoard&CenterZ0Z1Mask))
+
+	// P3/P4/P7: 3-column staircase fork base detection (columns where player owns z=0 & z=1 and z=2 is empty)
+	occupied := myBoard | oppBoard
+	myVert2 := uint16((myBoard & 0xFFFF) & (myBoard >> 16) &^ (occupied >> 32))
+	oppVert2 := uint16((oppBoard & 0xFFFF) & (oppBoard >> 16) &^ (occupied >> 32))
+	myZ2 := uint16(myBoard >> 32)
+	oppZ2 := uint16(oppBoard >> 32)
+	for _, lm := range planarLineMasks16 {
+		if (oppZ2 & lm) == 0 {
+			v2 := bits.OnesCount16(myVert2 & lm)
+			z2 := bits.OnesCount16(myZ2 & lm)
+			if v2 >= 1 && v2+z2 >= 3 {
+				score += 220
+			} else if v2+z2 == 2 && v2 >= 1 {
+				score += 45
+			}
+		}
+		if (myZ2 & lm) == 0 {
+			v2 := bits.OnesCount16(oppVert2 & lm)
+			z2 := bits.OnesCount16(oppZ2 & lm)
+			if v2 >= 1 && v2+z2 >= 3 {
+				score -= 250
+			} else if v2+z2 == 2 && v2 >= 1 {
+				score -= 55
+			}
+		}
+	}
+
+	// Project free vertical z=2 checks (cashing in z=0+z=1 columns where opponent is forced to block z=3)
+	myVirtBoard := myBoard | (uint64(myVert2) << 32)
+	oppVirtBoard := oppBoard | (uint64(oppVert2) << 32)
+
+	// Column-wise suspended threat ownership (prevents z=2/z=3 Zugzwang traps)
+	mySuspended := myThreats &^ surface
+	oppSuspended := oppThreats &^ surface
+	if (mySuspended | oppSuspended) != 0 {
+		for col := uint8(0); col < engine.MaxActions; col++ {
+			lowestOwner := uint8(0) // 0=none, 1=me, 2=opp
+			for z := uint8(1); z < engine.GridDim; z++ {
+				bit := uint64(1) << (col + 16*z)
+				mHas := (mySuspended & bit) != 0
+				oHas := (oppSuspended & bit) != 0
+				if !mHas && !oHas {
+					continue
+				}
+				if lowestOwner == 0 {
+					if mHas && !oHas {
+						lowestOwner = 1
+						score += 55
+					} else if oHas && !mHas {
+						lowestOwner = 2
+						score -= 60
+					} else {
+						lowestOwner = 3
+					}
+				} else if lowestOwner == 1 && mHas {
+					score += 35
+				} else if lowestOwner == 2 && oHas {
+					score -= 40
+				}
+			}
+		}
+	}
+
+	var myTwoOnce, myForkIntersections uint64
+	var oppTwoOnce, oppForkIntersections uint64
+	myStackTargets := ((myThreats << 16) | (myThreats >> 16)) &^ occupied &^ oppThreats
+	oppStackTargets := ((oppThreats << 16) | (oppThreats >> 16)) &^ occupied &^ myThreats
 
 	for _, mask := range engine.WinMasks {
 		myBits := myBoard & mask
@@ -49,13 +192,23 @@ func EvaluateBoard(g *engine.Game, perspective engine.Player) int {
 			case 1:
 				score += 1
 			case 2:
-				score += 6
+				score += 8
+				emptyBits := mask &^ myBits
+				myForkIntersections |= myTwoOnce & emptyBits
+				myTwoOnce |= emptyBits
+				if (emptyBits & myStackTargets) != 0 {
+					if ((emptyBits &^ myStackTargets) & surface) != 0 {
+						score += 180
+					} else {
+						score += 75
+					}
+				}
 			case 3:
 				missingBit := mask &^ myBits
 				if (missingBit & surface) != 0 {
 					score += 65 // Playable immediate threat on gravity surface
 				} else {
-					score += 25 // Future floating threat
+					score += 32 // Future floating threat
 				}
 			}
 		} else if oppBits != 0 {
@@ -64,17 +217,53 @@ func EvaluateBoard(g *engine.Game, perspective engine.Player) int {
 			case 1:
 				score -= 1
 			case 2:
-				score -= 6
+				score -= 9
+				emptyBits := mask &^ oppBits
+				oppForkIntersections |= oppTwoOnce & emptyBits
+				oppTwoOnce |= emptyBits
+				if (emptyBits & oppStackTargets) != 0 {
+					if ((emptyBits &^ oppStackTargets) & surface) != 0 {
+						score -= 220
+					} else {
+						score -= 95
+					}
+				}
 			case 3:
 				missingBit := mask &^ oppBits
 				if (missingBit & surface) != 0 {
 					score -= 80 // Urgent playable opponent threat
 				} else {
-					score -= 28
+					score -= 36
+				}
+			}
+		}
+
+		// Also check virtual 2-in-a-row / 3-in-a-row staircase setups on z=2 after free vertical checks
+		if myVirtBoard != myBoard && (oppBoard&mask) == 0 {
+			vBits := myVirtBoard & mask
+			if vBits != myBits && bits.OnesCount64(vBits) >= 2 {
+				vEmpty := mask &^ vBits
+				if (vEmpty & myStackTargets) != 0 {
+					score += 190
+				}
+			}
+		}
+		if oppVirtBoard != oppBoard && (myBoard&mask) == 0 {
+			vBits := oppVirtBoard & mask
+			if vBits != oppBits && bits.OnesCount64(vBits) >= 2 {
+				vEmpty := mask &^ vBits
+				if (vEmpty & oppStackTargets) != 0 {
+					score -= 240
 				}
 			}
 		}
 	}
+
+	// P4: Planar & 3D Fork Intersections (cells belonging to >= 2 open 2-in-a-row lines)
+	score += 110 * bits.OnesCount64(myForkIntersections&surface)
+	score += 35 * bits.OnesCount64(myForkIntersections&^surface)
+	score -= 135 * bits.OnesCount64(oppForkIntersections&surface)
+	score -= 45 * bits.OnesCount64(oppForkIntersections&^surface)
 
 	return score
 }
@@ -134,6 +323,17 @@ func (a *AlphaBetaAgent) SelectAction(g *engine.Game) (uint8, error) {
 		return oppWins[0], nil
 	}
 
+	// Filter out 1-ply blunders at root when safe moves exist
+	safeValid := make([]uint8, 0, len(valid))
+	for _, act := range valid {
+		if !GivesOpponentImmediateWin(g, act) {
+			safeValid = append(safeValid, act)
+		}
+	}
+	if len(safeValid) > 0 {
+		valid = safeValid
+	}
+
 	bestAction := valid[0]
 	alpha := -1_000_000
 	beta := 1_000_000
@@ -161,7 +361,18 @@ func (a *AlphaBetaAgent) negamax(g *engine.Game, depth int, alpha int, beta int)
 		return ScoreWin - int(g.MoveCount+1)
 	}
 
-	valid := orderedValidActions(g)
+	// If opponent threatens an immediate 1-ply win, active player is forced to block
+	oppWins := FindImmediateWinningActions(g, g.CurrentPlayer.Opponent())
+	if len(oppWins) >= 2 {
+		return ScoreLoss + int(g.MoveCount+2)
+	}
+	var valid []uint8
+	if len(oppWins) == 1 {
+		valid = oppWins
+	} else {
+		valid = orderedValidActions(g)
+	}
+
 	bestVal := -1_000_000
 
 	for _, act := range valid {

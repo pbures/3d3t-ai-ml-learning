@@ -459,21 +459,25 @@ func (a *TTT3DNetAgent) Name() string {
 }
 
 func hasUnstoppableThreat(g *engine.Game, attacker engine.Player) bool {
-	threats := FindImmediateWinningActions(g, attacker)
-	if len(threats) == 0 {
+	if g == nil || g.Status != engine.StatusOngoing {
 		return false
 	}
-	if len(threats) >= 2 {
+	defender := attacker.Opponent()
+	myThreats := ThreatCellsMask(g, attacker)
+	if myThreats == 0 {
+		return false
+	}
+	oppThreats := ThreatCellsMask(g, defender)
+	surface := LandingMask(g)
+	if bits.OnesCount64(myThreats&surface) >= 2 {
 		return true
 	}
-	afterBlock := g.Clone()
-	if _, err := afterBlock.ApplyMove(threats[0]); err != nil {
-		return false
+	// Any two vertically consecutive 3-in-a-row threats (z and z+1 in the same column, h <= z)
+	// where the lower cell does not also complete a win for the defender is an unstoppable vertical fork.
+	if (myThreats & (myThreats >> 16) &^ oppThreats) != 0 {
+		return true
 	}
-	if afterBlock.Status != engine.StatusOngoing {
-		return false
-	}
-	return len(FindImmediateWinningActions(afterBlock, attacker)) > 0
+	return false
 }
 
 // SelectActionWithPolicy returns the chosen action, 16-element policy distribution, and state value.
@@ -577,16 +581,33 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 		candidates = nonForkVulnerable
 	}
 
-	// 6. 1-Ply Neural Value + Policy evaluation over candidate moves
+	// 6. Hybrid Neural Policy + 1-Ply Value + 3-Ply Bitboard Tactical Search over candidate moves
+	hasNonCeilingCandidate := false
+	for _, act := range candidates {
+		if z, ok := g.LandingZ(act); ok && z < 3 {
+			hasNonCeilingCandidate = true
+			break
+		}
+	}
+
+	ab := AlphaBetaAgent{MaxDepth: 3}
 	bestCandidate := candidates[0]
 	bestCombined := float32(-1e9)
 	for _, act := range candidates {
+		zLand, _ := g.LandingZ(act)
 		clone := g.Clone()
 		_, _ = clone.ApplyMove(act)
 		_, oppVal := a.model.PredictGame(clone)
 		myNextVal := -oppVal
-		threatBonus := float32(0.15) * float32(len(FindImmediateWinningActions(clone, me)))
-		combined := probs[act] + 0.5*myNextVal + threatBonus
+		abVal := -ab.negamax(clone, 2, -1_000_000, 1_000_000)
+		immThreats := len(FindImmediateWinningActions(clone, me))
+		threatBonus := float32(0.15) * float32(immThreats)
+		// P8 Anti-Passivity: avoid burning safe ceiling moves (z=3) unless creating an immediate threat
+		var ceilingPenalty float32
+		if hasNonCeilingCandidate && zLand == 3 && immThreats == 0 {
+			ceilingPenalty = 0.35
+		}
+		combined := probs[act] + 0.5*myNextVal + threatBonus + 0.008*float32(abVal) - ceilingPenalty
 		if combined > bestCombined {
 			bestCombined = combined
 			bestCandidate = act
