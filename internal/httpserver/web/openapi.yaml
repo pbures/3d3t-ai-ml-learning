@@ -7,16 +7,17 @@ info:
     Welcome to the **3T3D (3D Gravity Tic-Tac-Toe) Arena API** hosted at `https://3t3d.buresovi.net`.
 
     This API allows external players and developers to connect custom algorithms running on their own devices to:
-    1. **Create Named Matches (`POST /api/v1/games`)** with custom match names (`name`), custom `game_id` slugs, player names (`white_name`, `black_name`), and optional automatic server-side AI opponents (`opponent_agent`, `human_player`).
-    2. **Control Games Programmatically (`POST /api/v1/games/{id}/move`)** using either discrete column actions (`action` in `0..15`, where `action = 4*y + x`) or 2D column coordinates (`use_coords: true, x: 0..3, y: 0..3`). If the game has an `opponent_agent` configured (or `opponent_agent` is passed on the move request), the server can automatically compute and apply the AI model's reply in the same turn!
-    3. **Play Against Built-in Classical & Neural Models (`GET /api/v1/models`, `POST /api/v1/games/{id}/ai-move`, `POST /api/v1/bots/{agent}/move`)**:
+    1. **Organize Games into Battles (`POST /api/v1/battles`, `GET /api/v1/battles/{id}`, `POST /api/v1/battles/{id}/games`)** with a battle `name`, `date`, and `participant` (client player name). The client can play as many games as desired in the battle, and the API + UI track aggregate statistics (`client_wins`, `server_wins`, `draws`, `client_win_rate`, `winner_side`: `CLIENT` vs `SERVER`).
+    2. **Create Named Matches (`POST /api/v1/games`)** with custom match names (`name`), `battle_id`, `participant` (`client_name`), custom `game_id` slugs, player names (`white_name`, `black_name`), and optional automatic server-side AI opponents (`opponent_agent`, `human_player`). Every game explicitly reports `winner_side` (`CLIENT`, `SERVER`, `DRAW`, or `ONGOING`).
+    3. **Control Games Programmatically (`POST /api/v1/games/{id}/move`)** using either discrete column actions (`action` in `0..15`, where `action = 4*y + x`) or 2D column coordinates (`use_coords: true, x: 0..3, y: 0..3`). If the game has an `opponent_agent` configured (or `opponent_agent` is passed on the move request), the server can automatically compute and apply the AI model's reply in the same turn!
+    4. **Play Against Built-in Classical & Neural Models (`GET /api/v1/models`, `POST /api/v1/games/{id}/ai-move`, `POST /api/v1/bots/{agent}/move`)**:
        - `ttt3dnet` — Hybrid 3D ResNet (`TTT3DNet`) + 2-ply tactical fork shield & 1-ply value lookahead.
        - `ttt3dnet-pure` — Pure single-pass 3D ResNet (`TTT3DNet`) policy inference.
        - `mcts` — Monte Carlo Tree Search (250 UCT simulations per move).
        - `alphabeta` — Depth-3 Negamax with Alpha-Beta pruning and 76-line heuristic evaluation.
        - `heuristic` — Fast 1-ply tactical win/block + poison filter + 76-line positional heuristic.
        - `random` — Uniform random legal column baseline.
-    4. **Orchestrate Bot-vs-Bot Matches (`POST /api/v1/matches/run`)** combining remote webhook URLs or built-in agent names.
+    5. **Orchestrate Bot-vs-Bot Matches (`POST /api/v1/matches/run`)** combining remote webhook URLs or built-in agent names.
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
@@ -32,6 +33,8 @@ servers:
 tags:
   - name: System & Discovery
     description: Health checks, OpenAPI specification, 76 winning lines geometry, and available AI models.
+  - name: Battles & Statistics
+    description: Organize sets of games into named battles with date, client participant, and aggregate Client vs Server statistics.
   - name: Games & Programmatic Play
     description: Create named matches, inspect 3D board states, submit algorithm moves, and play against built-in AI models.
   - name: AI Models & Webhooks
@@ -165,11 +168,174 @@ paths:
                     items:
                       $ref: "#/components/schemas/WinLineDTO"
 
+  /api/v1/battles:
+    get:
+      tags: [Battles & Statistics]
+      summary: List all battles with aggregate Client vs Server statistics
+      description: Returns all battles, including their name, date, participant (client player), battle winner (`CLIENT`, `SERVER`, `TIE`, or `ONGOING`), and win/loss/draw counts.
+      operationId: listBattles
+      responses:
+        "200":
+          description: Array of battle summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [battles]
+                properties:
+                  battles:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BattleSummaryDTO"
+    post:
+      tags: [Battles & Statistics]
+      summary: Create a new battle with name, date, and participant (client player)
+      description: |
+        Creates a new battle so the client player (`participant` / `client_name`) can play as many games as desired in the battle and track aggregate battle statistics.
+      operationId: createBattle
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBattleRequest"
+      responses:
+        "201":
+          description: Created battle detail and initial statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BattleDetailDTO"
+        "400":
+          description: Invalid JSON or unknown opponent_agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/battles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique battle identifier (`battle_id`)
+        schema:
+          type: string
+    get:
+      tags: [Battles & Statistics]
+      summary: Get battle statistics, winner (Client vs Server), and all games in the battle
+      operationId: getBattle
+      responses:
+        "200":
+          description: Battle metadata, aggregate statistics, winner, and games list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BattleDetailDTO"
+        "404":
+          description: Battle not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      tags: [Battles & Statistics]
+      summary: Update battle name, date, participant (client player), or default AI model
+      operationId: updateBattle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBattleRequest"
+      responses:
+        "200":
+          description: Updated battle detail and statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BattleDetailDTO"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Battle not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/battles/{id}/games:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Unique battle identifier (`battle_id`)
+        schema:
+          type: string
+    get:
+      tags: [Battles & Statistics]
+      summary: List all games and aggregate statistics for a battle
+      operationId: listBattleGames
+      responses:
+        "200":
+          description: Battle details and games
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BattleDetailDTO"
+        "404":
+          description: Battle not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [Battles & Statistics]
+      summary: Create a new game inside an existing battle
+      description: Creates a new game associated with `battle_id = {id}`, automatically inheriting the battle's `participant` (client player name) and default `opponent_agent` if not overridden.
+      operationId: createBattleGame
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGameRequest"
+      responses:
+        "201":
+          description: Created game state linked to the battle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameStateDTO"
+        "400":
+          description: Invalid JSON or unknown opponent_agent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Battle not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/v1/games:
     get:
       tags: [Games & Programmatic Play]
-      summary: List all active and completed games
+      summary: List all active and completed games (optionally filtered by battle_id)
       operationId: listGames
+      parameters:
+        - name: battle_id
+          in: query
+          required: false
+          description: Optional battle ID to filter games belonging to a specific battle
+          schema:
+            type: string
       responses:
         "200":
           description: Array of game summaries sorted by game_id
@@ -417,7 +583,7 @@ paths:
         description: Built-in model identifier (`ttt3dnet`, `ttt3dnet-pure`, `mcts`, `alphabeta`, `heuristic`, `random`)
         schema:
           type: string
-          enum: [ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+          enum: [ttt3d-deep-gray1, ttt3d-deep-gray1-pure, deep, ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
     post:
       tags: [AI Models & Webhooks]
       summary: Stateless AI model evaluation webhook
@@ -539,16 +705,184 @@ components:
           minimum: 1
           maximum: 64
 
+    CreateBattleRequest:
+      type: object
+      properties:
+        battle_id:
+          type: string
+          description: Optional custom battle identifier slug (auto-generated if omitted)
+          example: battle-alpha-1
+        name:
+          type: string
+          description: Human-friendly name for the battle
+          example: Evening Showdown vs TTT3DNet
+        date:
+          type: string
+          description: Battle date/timestamp (ISO-8601/RFC3339 or date string; defaults to current UTC time)
+          example: "2026-11-12T21:45:00Z"
+        participant:
+          type: string
+          description: Name of the player (the client) participating in the battle
+          example: MyLaptopBot
+        client_name:
+          type: string
+          description: Alias for `participant` (client player name)
+          example: MyLaptopBot
+        opponent_agent:
+          type: string
+          description: Optional default server AI model for games in this battle
+          enum: ["", ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+
+    UpdateBattleRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        date:
+          type: string
+        participant:
+          type: string
+        client_name:
+          type: string
+        opponent_agent:
+          type: string
+
+    BattleSummaryDTO:
+      type: object
+      required:
+        - battle_id
+        - name
+        - date
+        - participant
+        - client_name
+        - total_games
+        - completed_games
+        - ongoing_games
+        - client_wins
+        - server_wins
+        - draws
+        - client_win_rate
+        - server_win_rate
+        - client_score_rate
+        - winner_side
+        - winner_label
+        - game_ids
+      properties:
+        battle_id:
+          type: string
+          example: battle-1
+        name:
+          type: string
+          example: Evening Showdown vs TTT3DNet
+        date:
+          type: string
+          example: "2026-11-12T21:45:00Z"
+        participant:
+          type: string
+          description: Name of the client player participating in the battle
+          example: MyLaptopBot
+        client_name:
+          type: string
+          example: MyLaptopBot
+        opponent_agent:
+          type: string
+          example: ttt3dnet
+        total_games:
+          type: integer
+        completed_games:
+          type: integer
+        ongoing_games:
+          type: integer
+        client_wins:
+          type: integer
+        server_wins:
+          type: integer
+        draws:
+          type: integer
+        client_win_rate:
+          type: number
+          format: double
+        server_win_rate:
+          type: number
+          format: double
+        client_score_rate:
+          type: number
+          format: double
+        winner_side:
+          type: string
+          enum: [CLIENT, SERVER, TIE, ONGOING]
+          description: Indicates whether the CLIENT or SERVER won the battle overall
+        winner_label:
+          type: string
+          example: CLIENT (MyLaptopBot)
+        game_ids:
+          type: array
+          items:
+            type: string
+
+    BattleDetailDTO:
+      allOf:
+        - $ref: "#/components/schemas/BattleSummaryDTO"
+        - type: object
+          required: [games]
+          properties:
+            games:
+              type: array
+              items:
+                $ref: "#/components/schemas/GameSummaryDTO"
+
     GameSummaryDTO:
       type: object
-      required: [game_id, name, white_name, black_name, status, winner, move_count, current_player]
+      required:
+        - game_id
+        - battle_id
+        - name
+        - participant
+        - client_name
+        - client_player
+        - server_player
+        - winner_side
+        - winner_label
+        - white_name
+        - black_name
+        - status
+        - winner
+        - move_count
+        - current_player
       properties:
         game_id:
           type: string
           example: match-alpha-1
+        battle_id:
+          type: string
+          example: battle-1
+        battle_name:
+          type: string
+          example: Evening Showdown vs TTT3DNet
         name:
           type: string
-          example: Qualifying Match #1 — MyBot vs TTT3DNet
+          example: CW - Qualifying Match #1 — MyBot vs TTT3DNet
+        participant:
+          type: string
+          example: MyLaptopBot
+        client_name:
+          type: string
+          example: MyLaptopBot
+        client_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the client plays (1 = White, 2 = Black)
+        server_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the server plays (1 = White, 2 = Black)
+        winner_side:
+          type: string
+          enum: [CLIENT, SERVER, DRAW, ONGOING]
+          description: Explicitly identifies whether the CLIENT or SERVER won this game
+        winner_label:
+          type: string
+          example: CLIENT (MyLaptopBot)
         white_name:
           type: string
           example: MyExternalBot (White)
@@ -576,7 +910,14 @@ components:
       type: object
       required:
         - game_id
+        - battle_id
         - name
+        - participant
+        - client_name
+        - client_player
+        - server_player
+        - winner_side
+        - winner_label
         - white_name
         - black_name
         - white_bitboard
@@ -597,10 +938,38 @@ components:
         game_id:
           type: string
           example: match-alpha-1
+        battle_id:
+          type: string
+          example: battle-1
+        battle_name:
+          type: string
+          example: Evening Showdown vs TTT3DNet
         name:
           type: string
           description: Human-readable match title/name
-          example: Qualifying Match #1 — MyBot vs TTT3DNet
+          example: CW - Qualifying Match #1 — MyBot vs TTT3DNet
+        participant:
+          type: string
+          description: Client player name
+          example: MyLaptopBot
+        client_name:
+          type: string
+          example: MyLaptopBot
+        client_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the client controls (1 = White, 2 = Black)
+        server_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the server controls (1 = White, 2 = Black)
+        winner_side:
+          type: string
+          enum: [CLIENT, SERVER, DRAW, ONGOING]
+          description: Explicitly identifies whether the CLIENT or SERVER won this game
+        winner_label:
+          type: string
+          example: CLIENT (MyLaptopBot)
         white_name:
           type: string
           example: MyExternalBot
@@ -682,10 +1051,21 @@ components:
           type: string
           description: Optional custom game identifier slug (auto-generated if omitted)
           example: my-algo-match-01
+        battle_id:
+          type: string
+          description: Optional battle identifier to organize this game under (defaults to `default`)
+          example: battle-1
         name:
           type: string
           description: Human-friendly name/title for the match (shown in 3D Replay UI and game listings)
           example: Championship Game 1 — MyBot vs TTT3DNet
+        participant:
+          type: string
+          description: Name of the client player
+          example: MyLaptopBot
+        client_name:
+          type: string
+          description: Alias for `participant` (client player name)
         white_name:
           type: string
           example: MyLaptopBot (White)
@@ -700,13 +1080,26 @@ components:
           type: integer
           enum: [1, 2]
           description: Which side the external player controls when `opponent_agent` is set (`1` = White, `2` = Black; if `2`, the AI makes the opening White move immediately)
+        client_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the client controls (`1` = White, `2` = Black)
 
     UpdateGameRequest:
       type: object
       properties:
+        battle_id:
+          type: string
         name:
           type: string
           description: New match name/title
+        participant:
+          type: string
+        client_name:
+          type: string
+        client_player:
+          type: integer
+          enum: [1, 2]
         white_name:
           type: string
         black_name:
@@ -768,7 +1161,7 @@ components:
         agent:
           type: string
           description: Built-in AI model identifier (defaults to `ttt3dnet` or session's `opponent_agent` if omitted)
-          enum: [ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
+          enum: [ttt3d-deep-gray1, ttt3d-deep-gray1-pure, deep, ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random]
           example: ttt3dnet
 
     PresetRequest:
@@ -791,10 +1184,23 @@ components:
       properties:
         game_id:
           type: string
+        battle_id:
+          type: string
+          description: Optional battle ID to organize this match under
         name:
           type: string
           description: Human-readable match title/name
           example: Bot Showdown — TTT3DNet vs MCTS
+        participant:
+          type: string
+          description: Client participant name
+        client_name:
+          type: string
+          description: Alias for participant
+        client_player:
+          type: integer
+          enum: [1, 2]
+          description: Which side the client controls (1 = White, 2 = Black)
         white_name:
           type: string
         black_name:

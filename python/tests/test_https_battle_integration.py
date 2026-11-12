@@ -271,9 +271,54 @@ def test_https_webhook_and_client_neural_tournaments(
         num_games=2,
         mode="client",
         prefix="client-nn",
+        battle_id="py-custom-battle",
+        battle_name="Python Client Battle",
+        participant="PyChallengeClient",
+        battle_date="2026-11-12",
     )
     assert client_res["num_games"] == 2
     assert client_res["wins"] + client_res["draws"] + client_res["losses"] == 2
+    assert client_res["battle_id"] == "py-custom-battle"
+    assert client_res["participant"] == "PyChallengeClient"
+    assert client_res["winner_side"] in ("CLIENT", "SERVER", "TIE")
+
+    # Play an additional game in the same battle and verify battle statistics
+    extra_game = https_arena_client.create_battle_game(
+        battle_id="py-custom-battle",
+        game_id="py-custom-battle-extra",
+        name="Extra Battle Game",
+        white_name="PyChallengeClient",
+        black_name="Go Heuristic",
+        participant="PyChallengeClient",
+        opponent_agent="heuristic",
+        human_player=1,
+        client_player=1,
+    )
+    assert extra_game["battle_id"] == "py-custom-battle"
+    assert extra_game["participant"] == "PyChallengeClient"
+    assert extra_game["winner_side"] == "ONGOING"
+    https_arena_client.apply_preset("py-custom-battle-extra", preset_type="win", line_index=0, winner=1)
+
+    battle_detail = https_arena_client.get_battle("py-custom-battle")
+    assert battle_detail["total_games"] == 3
+    assert battle_detail["completed_games"] == 3
+    assert battle_detail["client_wins"] + battle_detail["server_wins"] + battle_detail["draws"] == 3
+
+    updated_battle = https_arena_client.update_battle(
+        "py-custom-battle",
+        name="Python Client Battle Updated",
+        date="2026-11-13",
+        participant="PyChallengeClientV2",
+        opponent_agent="random",
+    )
+    assert updated_battle["name"] == "Python Client Battle Updated"
+    assert updated_battle["participant"] == "PyChallengeClientV2"
+
+    battles_list = https_arena_client.list_battles()
+    assert any(b["battle_id"] == "py-custom-battle" for b in battles_list)
+
+    battle_games = https_arena_client.list_games(battle_id="py-custom-battle")
+    assert len(battle_games) == 3
 
     # Verify all played games appear in `GET /api/v1/games` and have full move histories for 3D replay
     games_list = https_arena_client.list_games()
@@ -282,6 +327,7 @@ def test_https_webhook_and_client_neural_tournaments(
         assert gid in recorded_ids
         replay = https_arena_client.get_game(gid)
         assert replay["status"] in ("WHITE_WON", "BLACK_WON", "DRAW")
+        assert replay["winner_side"] in ("CLIENT", "SERVER", "DRAW")
         assert len(replay["history"]) == replay["move_count"]
         assert replay["move_count"] >= 7
 
@@ -289,6 +335,9 @@ def test_https_webhook_and_client_neural_tournaments(
     openapi = https_arena_client.get_openapi_spec()
     assert openapi["openapi"] == "3.1.0"
     assert "/api/v1/games" in openapi["paths"]
+    assert "/api/v1/battles" in openapi["paths"]
+    assert "/api/v1/battles/{id}" in openapi["paths"]
+    assert "/api/v1/battles/{id}/games" in openapi["paths"]
 
     models = https_arena_client.list_models()
     model_ids = {m["id"] for m in models}
@@ -335,6 +384,11 @@ def test_https_webhook_and_client_neural_tournaments(
     tool_names = {t["name"] for t in tools_res["result"]["tools"]}
     assert {
         "list_models",
+        "list_battles",
+        "create_battle",
+        "get_battle",
+        "update_battle",
+        "create_battle_game",
         "list_games",
         "create_game",
         "get_game",
@@ -345,16 +399,33 @@ def test_https_webhook_and_client_neural_tournaments(
         "run_match",
     } <= tool_names
 
-    mcp_created = https_arena_client.mcp_call_tool(
-        "create_game",
+    mcp_battle = https_arena_client.mcp_call_tool(
+        "create_battle",
         {
+            "battle_id": "mcp-https-battle",
+            "name": "MCP HTTPS Battle",
+            "date": "2026-11-12",
+            "participant": "MCPPlayer",
+            "opponent_agent": "ttt3dnet",
+        },
+    )
+    assert mcp_battle["battle_id"] == "mcp-https-battle"
+    assert mcp_battle["participant"] == "MCPPlayer"
+
+    mcp_created = https_arena_client.mcp_call_tool(
+        "create_battle_game",
+        {
+            "battle_id": "mcp-https-battle",
             "game_id": "mcp-https-game",
             "name": "MCP HTTPS Game vs TTT3DNet",
             "opponent_agent": "ttt3dnet",
             "human_player": 2,
+            "client_player": 2,
         },
     )
     assert mcp_created["name"].endswith("MCP HTTPS Game vs TTT3DNet")
+    assert mcp_created["battle_id"] == "mcp-https-battle"
+    assert mcp_created["participant"] == "MCPPlayer"
     assert mcp_created["move_count"] == 1
     assert mcp_created["current_player"] == 2
 

@@ -298,6 +298,149 @@ func TestUnitHandlerMethodsAndErrors(t *testing.T) {
 		t.Fatalf("expected 409 on terminal state in bot webhook, got %d", rec.Code)
 	}
 
+	// 7b. Battles endpoints & edge cases
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/battles", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"default"`) {
+		t.Fatalf("expected 200 on GET /api/v1/battles with default battle, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/battles", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on DELETE /api/v1/battles, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles", strings.NewReader("{bad"))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad JSON in POST /api/v1/battles, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles", strings.NewReader(`{"opponent_agent":"invalid-agent"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid opponent_agent in POST /api/v1/battles, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles", strings.NewReader(`{"battle_id":"unit-battle","name":"Unit Battle","client_name":"UnitClient","opponent_agent":"heuristic"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"UnitClient"`) {
+		t.Fatalf("expected 201 on POST /api/v1/battles, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Auto-generated battle ID, name, date, participant defaults
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on empty POST /api/v1/battles, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/battles/", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on empty battle_id, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/battles/missing-battle", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on missing battle, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/battles/unit-battle", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on DELETE /api/v1/battles/unit-battle, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/v1/battles/unit-battle", strings.NewReader("{bad"))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad JSON in PATCH battle, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/v1/battles/unit-battle", strings.NewReader(`{"opponent_agent":"invalid"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid opponent_agent in PATCH battle, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/v1/battles/missing-battle", strings.NewReader(`{"name":"Updated"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on PATCH missing battle, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/v1/battles/unit-battle", strings.NewReader(`{"name":"Updated Battle","date":"2026-11-12","participant":"NewParticipant","client_name":"NewClient","opponent_agent":"random"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"Updated Battle"`) {
+		t.Fatalf("expected 200 on PATCH battle, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/battles/missing-battle/games", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on GET /api/v1/battles/missing-battle/games, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/battles/unit-battle/games", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on DELETE /api/v1/battles/unit-battle/games, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles/missing-battle/games", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on POST /api/v1/battles/missing-battle/games, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles/unit-battle/games", strings.NewReader("{bad"))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad JSON in POST /api/v1/battles/unit-battle/games, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/battles/unit-battle/games", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on empty POST /api/v1/battles/unit-battle/games, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/battles/unit-battle/unknown", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on unknown battle sub-route, got %d", rec.Code)
+	}
+
+	// Update game battle_id, participant, client_name, client_player via PATCH
+	req = httptest.NewRequest(http.MethodPatch, "/api/v1/games/default", strings.NewReader(`{"battle_id":"unit-battle","participant":"PatchPlayer","client_name":"PatchClient","client_player":2}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"unit-battle"`) {
+		t.Fatalf("expected 200 on PATCH game with battle fields, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
 	// 8. StartHTTPServer lifecycle & invalid address test
 	_, httpURL, stopHTTP, err := StartHTTPServer("127.0.0.1:0")
 	if err != nil {
@@ -469,8 +612,15 @@ func TestUnitMCPServerHTTPAndStdio(t *testing.T) {
 		`{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"get_game","arguments":{"game_id":"mcp-g1"}}}`,
 		`{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"trigger_ai_move","arguments":{"game_id":"mcp-g1","agent":"random"}}}`,
 		`{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"reset_game","arguments":{"game_id":"mcp-g1"}}}`,
-		`{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"list_games"}}`,
-		`{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"run_match","arguments":{"name":"MCP Auto Match","white_agent":"heuristic","black_agent":"random"}}}`,
+		`{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"list_games","arguments":{"battle_id":"default"}}}`,
+		`{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"run_match","arguments":{"name":"MCP Auto Match","battle_id":"default","participant":"MCPClient","white_agent":"heuristic","black_agent":"random"}}}`,
+		`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"list_battles"}}`,
+		`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"create_battle","arguments":{"battle_id":"mcp-b1","name":"MCP Battle 1","date":"2026-11-12","participant":"MCPClient","opponent_agent":"random"}}}`,
+		`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"get_battle","arguments":{"battle_id":"mcp-b1"}}}`,
+		`{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"update_battle","arguments":{"battle_id":"mcp-b1","name":"MCP Battle 1 Renamed","participant":"MCPClient2"}}}`,
+		`{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"update_battle","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"create_battle_game","arguments":{"battle_id":"mcp-b1","game_id":"mcp-b1-g1","name":"MCP Battle Game 1","client_player":1}}}`,
+		`{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"create_battle_game","arguments":{}}}`,
 	}, "\n") + "\n"
 
 	var stdioOut bytes.Buffer
@@ -478,8 +628,8 @@ func TestUnitMCPServerHTTPAndStdio(t *testing.T) {
 		t.Fatalf("ServeMCPStdio failed: %v", err)
 	}
 	outLines := strings.Split(strings.TrimSpace(stdioOut.String()), "\n")
-	if len(outLines) != 19 {
-		t.Fatalf("expected 19 JSON-RPC responses from ServeMCPStdio (notification skipped), got %d", len(outLines))
+	if len(outLines) != 26 {
+		t.Fatalf("expected 26 JSON-RPC responses from ServeMCPStdio (notification skipped), got %d", len(outLines))
 	}
 }
 

@@ -690,8 +690,89 @@ class ArenaBattleClient:
         resp = self._request("GET", "/api/v1/winlines")
         return list(resp.get("lines") or [])
 
-    def list_games(self) -> List[Dict[str, Any]]:
-        resp = self._request("GET", "/api/v1/games")
+    def list_battles(self) -> List[Dict[str, Any]]:
+        resp = self._request("GET", "/api/v1/battles")
+        return list(resp.get("battles") or [])
+
+    def create_battle(
+        self,
+        name: str = "",
+        participant: str = "TTT3DNet-Client",
+        date: str = "",
+        battle_id: str = "",
+        opponent_agent: str = "",
+        client_name: str = "",
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if battle_id:
+            payload["battle_id"] = battle_id
+        if name:
+            payload["name"] = name
+        if date:
+            payload["date"] = date
+        effective_participant = client_name if client_name else participant
+        if effective_participant:
+            payload["participant"] = effective_participant
+            payload["client_name"] = effective_participant
+        if opponent_agent:
+            payload["opponent_agent"] = opponent_agent
+        return self._request("POST", "/api/v1/battles", payload)
+
+    def get_battle(self, battle_id: str = "default") -> Dict[str, Any]:
+        return self._request("GET", f"/api/v1/battles/{battle_id}")
+
+    def update_battle(
+        self,
+        battle_id: str,
+        name: Optional[str] = None,
+        date: Optional[str] = None,
+        participant: Optional[str] = None,
+        opponent_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if date is not None:
+            payload["date"] = date
+        if participant is not None:
+            payload["participant"] = participant
+            payload["client_name"] = participant
+        if opponent_agent is not None:
+            payload["opponent_agent"] = opponent_agent
+        return self._request("PATCH", f"/api/v1/battles/{battle_id}", payload)
+
+    def create_battle_game(
+        self,
+        battle_id: str,
+        game_id: str = "",
+        name: str = "",
+        white_name: str = "",
+        black_name: str = "",
+        participant: str = "",
+        opponent_agent: str = "",
+        human_player: int = 0,
+        client_player: int = 0,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "game_id": game_id,
+            "name": name,
+            "white_name": white_name,
+            "black_name": black_name,
+        }
+        if participant:
+            payload["participant"] = participant
+            payload["client_name"] = participant
+        if opponent_agent:
+            payload["opponent_agent"] = opponent_agent
+        if human_player in (1, 2):
+            payload["human_player"] = int(human_player)
+        if client_player in (1, 2):
+            payload["client_player"] = int(client_player)
+        return self._request("POST", f"/api/v1/battles/{battle_id}/games", payload)
+
+    def list_games(self, battle_id: str = "") -> List[Dict[str, Any]]:
+        path = f"/api/v1/games?battle_id={battle_id}" if battle_id else "/api/v1/games"
+        resp = self._request("GET", path)
         return list(resp.get("games") or [])
 
     def create_game(
@@ -702,6 +783,9 @@ class ArenaBattleClient:
         black_name: str = "Player 2 (Black)",
         opponent_agent: str = "",
         human_player: int = 0,
+        battle_id: str = "",
+        participant: str = "",
+        client_player: int = 0,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "game_id": game_id,
@@ -709,10 +793,17 @@ class ArenaBattleClient:
             "white_name": white_name,
             "black_name": black_name,
         }
+        if battle_id:
+            payload["battle_id"] = battle_id
+        if participant:
+            payload["participant"] = participant
+            payload["client_name"] = participant
         if opponent_agent:
             payload["opponent_agent"] = opponent_agent
         if human_player in (1, 2):
             payload["human_player"] = int(human_player)
+        if client_player in (1, 2):
+            payload["client_player"] = int(client_player)
         return self._request("POST", "/api/v1/games", payload)
 
     def rename_game(
@@ -792,22 +883,29 @@ class ArenaBattleClient:
         white_agent: str = "",
         black_agent: str = "",
         timeout_ms: int = 5000,
+        battle_id: str = "",
+        participant: str = "",
+        client_player: int = 0,
     ) -> Dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/v1/matches/run",
-            {
-                "game_id": game_id,
-                "name": name,
-                "white_name": white_name,
-                "black_name": black_name,
-                "white_bot_url": white_bot_url,
-                "black_bot_url": black_bot_url,
-                "white_agent": white_agent,
-                "black_agent": black_agent,
-                "timeout_ms": int(timeout_ms),
-            },
-        )
+        payload: Dict[str, Any] = {
+            "game_id": game_id,
+            "name": name,
+            "white_name": white_name,
+            "black_name": black_name,
+            "white_bot_url": white_bot_url,
+            "black_bot_url": black_bot_url,
+            "white_agent": white_agent,
+            "black_agent": black_agent,
+            "timeout_ms": int(timeout_ms),
+        }
+        if battle_id:
+            payload["battle_id"] = battle_id
+        if participant:
+            payload["participant"] = participant
+            payload["client_name"] = participant
+        if client_player in (1, 2):
+            payload["client_player"] = int(client_player)
+        return self._request("POST", "/api/v1/matches/run", payload)
 
     def play_client_match(
         self,
@@ -817,11 +915,14 @@ class ArenaBattleClient:
         name: str = "",
         bot_plays_white: bool = True,
         bot_name: str = "TTT3DNet",
+        battle_id: str = "",
+        participant: str = "",
     ) -> Dict[str, Any]:
         """Plays a full turn-by-turn match against a server-side agent over HTTPS."""
+        client_participant = participant if participant else bot_name
         opp_label = f"Go {opponent_agent.capitalize()}"
-        w_name = f"{bot_name} (White)" if bot_plays_white else f"{opp_label} (White)"
-        b_name = f"{opp_label} (Black)" if bot_plays_white else f"{bot_name} (Black)"
+        w_name = f"{client_participant} (White)" if bot_plays_white else f"{opp_label} (White)"
+        b_name = f"{opp_label} (Black)" if bot_plays_white else f"{client_participant} (Black)"
         nn_player = PLAYER_WHITE if bot_plays_white else PLAYER_BLACK
         match_name = name if name else (f"{w_name} vs {b_name}")
 
@@ -830,6 +931,9 @@ class ArenaBattleClient:
             name=match_name,
             white_name=w_name,
             black_name=b_name,
+            battle_id=battle_id,
+            participant=client_participant,
+            client_player=nn_player,
         )
         actual_gid = str(state["game_id"])
 
@@ -857,8 +961,12 @@ class ArenaBattleClient:
         webhook_move_url: Optional[str] = None,
         prefix: str = "",
         match_name: str = "",
+        battle_id: str = "",
+        battle_name: str = "",
+        participant: str = "TTT3DNet",
+        battle_date: str = "",
     ) -> Dict[str, Any]:
-        """Runs a paired multi-game match alternating White and Black against `opponent_agent`."""
+        """Runs a paired multi-game battle alternating White and Black against `opponent_agent`."""
         if num_games <= 0:
             raise ValueError("num_games must be positive")
         wins = 0
@@ -866,15 +974,36 @@ class ArenaBattleClient:
         losses = 0
         game_ids: List[str] = []
 
+        effective_battle_name = battle_name or match_name or f"{participant} vs {opponent_agent}"
+        if battle_id:
+            try:
+                battle_info = self.get_battle(battle_id)
+            except ArenaHTTPError:
+                battle_info = self.create_battle(
+                    battle_id=battle_id,
+                    name=effective_battle_name,
+                    participant=participant,
+                    date=battle_date,
+                    opponent_agent=opponent_agent,
+                )
+        else:
+            battle_info = self.create_battle(
+                name=effective_battle_name,
+                participant=participant,
+                date=battle_date,
+                opponent_agent=opponent_agent,
+            )
+        active_battle_id = str(battle_info["battle_id"])
+
         server_bot_url = f"{self.base_url}/api/v1/bots/{opponent_agent}/move"
 
         for idx in range(num_games):
             bot_white = idx % 2 == 0
             nn_player = PLAYER_WHITE if bot_white else PLAYER_BLACK
             if bot_white:
-                matchup = f"TTT3DNet-white-vs-{opponent_agent}-black-{idx + 1}"
+                matchup = f"{participant}-white-vs-{opponent_agent}-black-{idx + 1}"
             else:
-                matchup = f"{opponent_agent}-white-vs-TTT3DNet-black-{idx + 1}"
+                matchup = f"{opponent_agent}-white-vs-{participant}-black-{idx + 1}"
             gid = f"{prefix}-{matchup}" if prefix else matchup
             title = f"{match_name} (#{idx + 1})" if match_name else gid
 
@@ -883,8 +1012,8 @@ class ArenaBattleClient:
                     raise ValueError("webhook_move_url is required when mode='webhook'")
                 w_url = webhook_move_url if bot_white else server_bot_url
                 b_url = server_bot_url if bot_white else webhook_move_url
-                w_name = "TTT3DNet (White)" if bot_white else f"Go {opponent_agent.capitalize()} (White)"
-                b_name = f"Go {opponent_agent.capitalize()} (Black)" if bot_white else "TTT3DNet (Black)"
+                w_name = f"{participant} (White)" if bot_white else f"Go {opponent_agent.capitalize()} (White)"
+                b_name = f"Go {opponent_agent.capitalize()} (Black)" if bot_white else f"{participant} (Black)"
                 final_state = self.run_webhook_match(
                     white_bot_url=w_url,
                     black_bot_url=b_url,
@@ -892,6 +1021,9 @@ class ArenaBattleClient:
                     name=title,
                     white_name=w_name,
                     black_name=b_name,
+                    battle_id=active_battle_id,
+                    participant=participant,
+                    client_player=nn_player,
                 )
             else:
                 final_state = self.play_client_match(
@@ -900,6 +1032,9 @@ class ArenaBattleClient:
                     game_id=gid,
                     name=title,
                     bot_plays_white=bot_white,
+                    bot_name=participant,
+                    battle_id=active_battle_id,
+                    participant=participant,
                 )
 
             game_ids.append(str(final_state["game_id"]))
@@ -911,7 +1046,14 @@ class ArenaBattleClient:
             else:
                 losses += 1
 
+        final_battle = self.get_battle(active_battle_id)
         return {
+            "battle_id": active_battle_id,
+            "battle_name": final_battle.get("name", effective_battle_name),
+            "participant": final_battle.get("participant", participant),
+            "winner_side": final_battle.get("winner_side", ""),
+            "winner_label": final_battle.get("winner_label", ""),
+            "battle": final_battle,
             "opponent": opponent_agent,
             "mode": mode,
             "num_games": num_games,

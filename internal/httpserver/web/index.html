@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>3T3D — 3D Gravity Tic-Tac-Toe Arena & Replay Studio</title>
+  <title>3T3D — 3D Gravity Tic-Tac-Toe Arena & Battle Studio</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -14,6 +14,7 @@
       --accent: #38bdf8;
       --accent-hover: #0284c7;
       --win: #10b981;
+      --server-win: #f43f5e;
       --warn: #f59e0b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -34,12 +35,13 @@
       position: absolute;
       top: 16px;
       left: 16px;
-      background: rgba(15, 23, 42, 0.85);
+      background: rgba(15, 23, 42, 0.88);
       border: 1px solid var(--panel-border);
       border-radius: 10px;
       padding: 12px 16px;
       backdrop-filter: blur(8px);
       pointer-events: none;
+      max-width: 560px;
     }
     #hud-overlay h1 {
       font-size: 1.15rem;
@@ -47,50 +49,62 @@
       color: var(--accent);
       margin-bottom: 4px;
     }
+    #hud-battle-banner {
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      margin-bottom: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
     #hud-status {
-      font-size: 0.95rem;
-      font-weight: 600;
+      font-size: 0.96rem;
+      font-weight: 700;
     }
     #hud-sub {
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: var(--muted);
       margin-top: 4px;
     }
     #sidebar {
-      width: 400px;
+      width: 430px;
       background: var(--panel);
       border-left: 1px solid var(--panel-border);
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow-y: auto;
-      padding: 16px;
-      gap: 16px;
+      padding: 14px;
+      gap: 12px;
     }
     .card {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid var(--panel-border);
       border-radius: 8px;
-      padding: 12px;
+      padding: 11px 12px;
     }
     .card h2 {
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--muted);
-      margin-bottom: 10px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
     .row {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       align-items: center;
-      margin-bottom: 8px;
+      margin-bottom: 7px;
     }
-    select, button, input[type="range"] {
+    select, button, input[type="range"], input[type="text"] {
       font-family: inherit;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
     }
-    select {
+    select, input[type="text"] {
       flex: 1;
       background: var(--bg);
       color: var(--text);
@@ -107,6 +121,7 @@
       cursor: pointer;
       font-weight: 600;
       transition: background 0.15s;
+      white-space: nowrap;
     }
     button:hover:not(:disabled) {
       background: var(--accent-hover);
@@ -120,11 +135,98 @@
       background: var(--accent-hover);
       border-color: var(--accent);
     }
+    .winner-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+    .pill-client {
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.45);
+    }
+    .pill-server {
+      background: rgba(244, 63, 94, 0.2);
+      color: #fb7185;
+      border: 1px solid rgba(244, 63, 94, 0.45);
+    }
+    .pill-tie {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+    }
+    .pill-ongoing {
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin: 8px 0;
+    }
+    .stat-box {
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      padding: 6px 4px;
+      text-align: center;
+    }
+    .stat-val {
+      font-size: 1.02rem;
+      font-weight: 700;
+    }
+    .stat-lbl {
+      font-size: 0.68rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .progress-bar {
+      height: 8px;
+      border-radius: 4px;
+      background: #334155;
+      overflow: hidden;
+      display: flex;
+      margin-bottom: 8px;
+    }
+    .progress-client { background: #10b981; height: 100%; }
+    .progress-draw { background: #f59e0b; height: 100%; }
+    .progress-server { background: #f43f5e; height: 100%; }
+    #battle-games-list {
+      max-height: 115px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .battle-game-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.03);
+      border-left: 3px solid transparent;
+    }
+    .battle-game-row:hover {
+      background: rgba(56, 189, 248, 0.14);
+    }
+    .battle-game-row.active {
+      background: rgba(56, 189, 248, 0.25);
+      border-left-color: var(--accent);
+    }
     .replay-controls {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
       gap: 6px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .grid-pad {
       display: grid;
@@ -132,12 +234,12 @@
       gap: 6px;
     }
     .grid-pad button {
-      padding: 8px 4px;
-      font-size: 0.78rem;
+      padding: 7px 4px;
+      font-size: 0.76rem;
       text-align: center;
     }
     #move-list {
-      max-height: 230px;
+      max-height: 160px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
@@ -146,9 +248,9 @@
     .move-item {
       display: flex;
       justify-content: space-between;
-      padding: 6px 8px;
+      padding: 5px 8px;
       border-radius: 4px;
-      font-size: 0.82rem;
+      font-size: 0.79rem;
       cursor: pointer;
       background: rgba(255, 255, 255, 0.03);
     }
@@ -181,22 +283,72 @@
   <div id="viewport-container">
     <div id="hud-overlay">
       <h1>3T3D — 4×4×4 Gravity Arena</h1>
+      <div id="hud-battle-banner">Battle: Default Arena Battle</div>
       <div id="hud-status">Loading game...</div>
       <div id="hud-sub">Drag to orbit 3D board • Scroll to zoom • Click a peg or column button to place ball</div>
     </div>
   </div>
 
   <div id="sidebar">
+    <!-- Battle Organization & Statistics Card -->
     <div class="card">
-      <h2>Game Session & Presets</h2>
+      <h2>
+        <span>Battle Organization & Statistics</span>
+        <span id="battle-winner-badge" class="winner-pill pill-ongoing">ONGOING</span>
+      </h2>
+      <div class="row">
+        <select id="battle-select" title="Select Battle"></select>
+        <button id="btn-refresh-battles" title="Refresh Battles & Stats">↻</button>
+      </div>
+      <div class="row">
+        <input type="text" id="battle-name-input" placeholder="Battle name (e.g. Night Finals)" />
+        <input type="text" id="battle-participant-input" placeholder="Participant (Client name)" style="max-width:145px;" />
+        <button id="btn-new-battle" class="primary">+ Battle</button>
+      </div>
+      <div id="battle-meta-line" style="font-size:0.75rem; color:var(--muted); margin-bottom:6px;">
+        Participant (Client): <strong id="stat-participant" style="color:var(--text);">Client Player</strong> • Date: <span id="stat-date">—</span>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-val" id="stat-total-games">0</div>
+          <div class="stat-lbl">Games</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" id="stat-client-wins" style="color:#34d399;">0 (0%)</div>
+          <div class="stat-lbl">Client Wins</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" id="stat-server-wins" style="color:#fb7185;">0 (0%)</div>
+          <div class="stat-lbl">Server Wins</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" id="stat-draws" style="color:#fbbf24;">0</div>
+          <div class="stat-lbl">Draws</div>
+        </div>
+      </div>
+      <div class="progress-bar" title="Client Wins (Green) / Draws (Amber) / Server Wins (Red)">
+        <div id="bar-client" class="progress-client" style="width:0%"></div>
+        <div id="bar-draw" class="progress-draw" style="width:0%"></div>
+        <div id="bar-server" class="progress-server" style="width:0%"></div>
+      </div>
+      <div style="font-size:0.73rem; color:var(--muted); margin-bottom:2px;">Games in Battle (Click to inspect — Winner: Client vs Server):</div>
+      <div id="battle-games-list"></div>
+    </div>
+
+    <!-- Game Session & Presets Card -->
+    <div class="card">
+      <h2>
+        <span>Game Session & Presets</span>
+        <span id="game-winner-badge" class="winner-pill pill-ongoing">ONGOING</span>
+      </h2>
       <div class="row">
         <select id="game-select"></select>
-        <button id="btn-new-game" class="primary">+ New</button>
+        <button id="btn-new-game" class="primary" title="Create new game in current battle">+ New Game</button>
         <button id="btn-reset-game">Reset</button>
       </div>
       <div class="row">
-        <input type="text" id="match-name-input" placeholder="Match name (e.g. Bot Finals #1)" style="flex:1; background:var(--bg); color:var(--text); border:1px solid var(--panel-border); border-radius:6px; padding:6px 8px; font-size:0.82rem;" />
-        <button id="btn-rename-game" title="Rename current match">Rename</button>
+        <input type="text" id="match-name-input" placeholder="Game name (e.g. Game #1)" />
+        <button id="btn-rename-game" title="Rename current game">Rename</button>
       </div>
       <div class="row" style="margin-bottom:0; flex-wrap:wrap; justify-content:space-between;">
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -204,10 +356,11 @@
           <button id="btn-preset-ortho" title="Load an Orthogonal X-Line win replay">Ortho Win</button>
           <button id="btn-preset-draw" title="Load a full 64-move Draw game replay">64-Move Draw</button>
         </div>
-        <a href="/docs" target="_blank" style="color:var(--accent); font-size:0.78rem; text-decoration:none; align-self:center;">OpenAPI Docs ↗</a>
+        <a href="/docs" target="_blank" style="color:var(--accent); font-size:0.76rem; text-decoration:none; align-self:center;">OpenAPI Docs ↗</a>
       </div>
     </div>
 
+    <!-- Step-by-Step Replay Controls -->
     <div class="card">
       <h2>Step-by-Step Replay Controls</h2>
       <div class="replay-controls">
@@ -218,12 +371,12 @@
         <button id="btn-last" title="Jump to Latest Move">&gt;&gt;|</button>
       </div>
       <div class="row">
-        <span style="font-size:0.8rem; color:var(--muted);">Ply:</span>
+        <span style="font-size:0.78rem; color:var(--muted);">Ply:</span>
         <input type="range" id="ply-slider" min="0" max="0" value="0" style="flex:1;" />
-        <span id="ply-label" style="font-size:0.82rem; min-width:52px; text-align:right;">0 / 0</span>
+        <span id="ply-label" style="font-size:0.8rem; min-width:52px; text-align:right;">0 / 0</span>
       </div>
       <div class="row" style="margin-bottom:0;">
-        <span style="font-size:0.8rem; color:var(--muted);">Replay Speed:</span>
+        <span style="font-size:0.78rem; color:var(--muted);">Replay Speed:</span>
         <select id="speed-select">
           <option value="800">Slow (0.8s / move)</option>
           <option value="450" selected>Normal (0.45s / move)</option>
@@ -232,8 +385,9 @@
       </div>
     </div>
 
+    <!-- AI Opponent & Neural Models -->
     <div class="card">
-      <h2>AI Opponent & Neural Models</h2>
+      <h2>AI Opponent & Neural Models (Server)</h2>
       <div class="row">
         <select id="ai-agent-select">
           <option value="ttt3dnet" selected>TTT3DNet Hybrid (3D ResNet + 2-Ply Shield)</option>
@@ -245,20 +399,22 @@
         </select>
         <button id="btn-ai-move" class="primary">Step AI Move</button>
       </div>
-      <div class="row" style="margin-bottom:0; font-size:0.8rem; color:var(--muted);">
+      <div class="row" style="margin-bottom:0; font-size:0.78rem; color:var(--muted);">
         <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
           <input type="checkbox" id="chk-auto-ai" checked />
-          Auto-reply with selected AI after my move
+          Auto-reply with selected Server AI after Client move
         </label>
       </div>
     </div>
 
+    <!-- Drop Ball Column Pad -->
     <div class="card">
       <h2>Drop Ball — Column (X, Y)</h2>
       <div id="column-pad" class="grid-pad"></div>
     </div>
 
-    <div class="card" style="flex:1; display:flex; flex-direction:column;">
+    <!-- Move History -->
+    <div class="card" style="flex:1; display:flex; flex-direction:column; min-height:130px;">
       <h2>Move History (Click to Jump)</h2>
       <div id="move-list"></div>
     </div>
@@ -268,6 +424,8 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+    let currentBattleId = 'default';
+    let currentBattleDetail = null;
     let currentGame = null;
     let replayPly = 0;
     let playTimer = null;
@@ -407,7 +565,9 @@
     }
 
     // --- UI Updates & Controls ---
+    const hudBattleBanner = document.getElementById('hud-battle-banner');
     const hudStatus = document.getElementById('hud-status');
+    const hudSub = document.getElementById('hud-sub');
     const plySlider = document.getElementById('ply-slider');
     const plyLabel = document.getElementById('ply-label');
     const moveListEl = document.getElementById('move-list');
@@ -424,6 +584,31 @@
         btn.onclick = () => submitMove(action);
         columnPad.appendChild(btn);
       }
+    }
+
+    function applyWinnerPill(el, side, label) {
+      if (!el) return;
+      el.className = 'winner-pill';
+      if (side === 'CLIENT') {
+        el.classList.add('pill-client');
+        el.textContent = `🏆 ${label || 'CLIENT WON'}`;
+      } else if (side === 'SERVER') {
+        el.classList.add('pill-server');
+        el.textContent = `🤖 ${label || 'SERVER WON'}`;
+      } else if (side === 'TIE' || side === 'DRAW') {
+        el.classList.add('pill-tie');
+        el.textContent = `🤝 ${label || side}`;
+      } else {
+        el.classList.add('pill-ongoing');
+        el.textContent = `⏳ ${label || 'ONGOING'}`;
+      }
+    }
+
+    function formatDateShort(dateStr) {
+      if (!dateStr) return '—';
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return dateStr;
+      return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
     }
 
     function stopAutoPlay() {
@@ -446,11 +631,32 @@
       updateHUDAndMoveList();
     }
 
+    function roleForPlayer(g, playerNum) {
+      const clientPlayer = g.client_player || 1;
+      if (playerNum === clientPlayer) {
+        return `CLIENT (${g.participant || g.client_name || 'Client'})`;
+      }
+      return `SERVER (${g.opponent_agent || 'Server'})`;
+    }
+
     function updateHUDAndMoveList() {
       if (!currentGame) return;
       const history = currentGame.history || [];
       const total = history.length;
       const isLiveTip = replayPly === total;
+
+      const gameWinnerBadge = document.getElementById('game-winner-badge');
+      applyWinnerPill(gameWinnerBadge, currentGame.winner_side, currentGame.winner_label);
+
+      const bName = currentBattleDetail ? currentBattleDetail.name : (currentGame.battle_name || currentGame.battle_id || 'default');
+      const partName = currentGame.participant || (currentBattleDetail && currentBattleDetail.participant) || 'Client Player';
+      const bDate = currentBattleDetail ? formatDateShort(currentBattleDetail.date) : '';
+      const bWinner = currentBattleDetail ? `Battle Leader: ${currentBattleDetail.winner_label}` : '';
+      hudBattleBanner.textContent = `Battle: ${bName} | Participant (Client): ${partName}${bDate ? ' | ' + bDate : ''}${bWinner ? ' | ' + bWinner : ''}`;
+
+      const whiteRole = roleForPlayer(currentGame, 1);
+      const blackRole = roleForPlayer(currentGame, 2);
+      hudSub.textContent = `White: ${whiteRole} • Black: ${blackRole} • Drag to orbit 3D board • Click a peg or column to play`;
 
       if (!isLiveTip) {
         const mv = history[replayPly - 1];
@@ -458,18 +664,21 @@
           hudStatus.textContent = `REPLAY MODE — Initial Empty Board (Ply 0 / ${total})`;
         } else {
           const pName = mv.player === 1 ? 'WHITE' : 'BLACK';
-          hudStatus.textContent = `REPLAY MODE (Ply ${replayPly}/${total}) — ${pName} played (${mv.x}, ${mv.y}, z=${mv.z})`;
+          const pRole = roleForPlayer(currentGame, mv.player);
+          hudStatus.textContent = `REPLAY MODE (Ply ${replayPly}/${total}) — ${pName} [${pRole}] played (${mv.x}, ${mv.y}, z=${mv.z})`;
         }
       } else {
-        if (currentGame.status === 'WHITE_WON') {
-          hudStatus.textContent = `🏆 WHITE WON on Line #${currentGame.win_line_index} (${currentGame.win_line_category})!`;
-        } else if (currentGame.status === 'BLACK_WON') {
-          hudStatus.textContent = `🏆 BLACK WON on Line #${currentGame.win_line_index} (${currentGame.win_line_category})!`;
+        if (currentGame.status === 'WHITE_WON' || currentGame.status === 'BLACK_WON') {
+          const sideBanner = currentGame.winner_side === 'CLIENT'
+            ? `🏆 CLIENT WON (${partName})`
+            : `🤖 SERVER WON (${currentGame.opponent_agent || 'Server'})`;
+          hudStatus.textContent = `${sideBanner} — ${currentGame.status} on Line #${currentGame.win_line_index} (${currentGame.win_line_category})!`;
         } else if (currentGame.status === 'DRAW') {
           hudStatus.textContent = `🤝 DRAW — All 64 positions filled with no 4-in-a-row!`;
         } else {
-          const turnName = currentGame.current_player === 1 ? 'WHITE (Player 1)' : 'BLACK (Player 2)';
-          hudStatus.textContent = `Turn: ${turnName} — Move ${total + 1}`;
+          const turnRole = roleForPlayer(currentGame, currentGame.current_player);
+          const turnColor = currentGame.current_player === 1 ? 'WHITE' : 'BLACK';
+          hudStatus.textContent = `Turn: ${turnColor} — ${turnRole} (Move ${total + 1})`;
         }
       }
 
@@ -493,7 +702,9 @@
         const row = document.createElement('div');
         row.className = 'move-item' + (replayPly === plyNum ? ' active' : '');
         const pClass = mv.player === 1 ? 'badge-white' : 'badge-black';
-        const pLabel = mv.player === 1 ? '● WHITE' : '○ BLACK';
+        const isClientMove = mv.player === (currentGame.client_player || 1);
+        const sideTag = isClientMove ? 'CLIENT' : 'SERVER';
+        const pLabel = mv.player === 1 ? `● WHITE (${sideTag})` : `○ BLACK (${sideTag})`;
         row.innerHTML = `<span class="${pClass}">#${plyNum} ${pLabel}</span><span>Col (${mv.x},${mv.y}) → z=${mv.z}</span>`;
         row.onclick = () => { stopAutoPlay(); setReplayPly(plyNum); };
         moveListEl.appendChild(row);
@@ -514,20 +725,118 @@
       return `${isServerWhite ? 'SW' : 'CW'} - ${clean}`;
     }
 
-    async function refreshGameList(selectedId) {
-      const res = await fetch('/api/v1/games');
-      const data = await res.json();
-      const sel = document.getElementById('game-select');
-      sel.innerHTML = '';
-      (data.games || []).forEach(g => {
-        const opt = document.createElement('option');
-        opt.value = g.game_id;
-        const formattedName = formatMatchPrefix(g);
-        const label = formattedName !== g.game_id ? `${formattedName} [${g.game_id}]` : formattedName;
-        opt.textContent = `${label} (${g.status}, ${g.move_count} moves)`;
-        if (g.game_id === selectedId) opt.selected = true;
-        sel.appendChild(opt);
-      });
+    function renderBattleStatistics(detail) {
+      if (!detail) return;
+      currentBattleDetail = detail;
+      document.getElementById('stat-participant').textContent = detail.participant || detail.client_name || 'Client Player';
+      document.getElementById('stat-date').textContent = formatDateShort(detail.date);
+      document.getElementById('stat-total-games').textContent = `${detail.total_games} (${detail.completed_games} done)`;
+
+      const cPct = Math.round((detail.client_win_rate || 0) * 100);
+      const sPct = Math.round((detail.server_win_rate || 0) * 100);
+      document.getElementById('stat-client-wins').textContent = `${detail.client_wins} (${cPct}%)`;
+      document.getElementById('stat-server-wins').textContent = `${detail.server_wins} (${sPct}%)`;
+      document.getElementById('stat-draws').textContent = `${detail.draws}`;
+
+      const comp = detail.completed_games || 0;
+      const cBar = comp > 0 ? (detail.client_wins / comp) * 100 : 0;
+      const dBar = comp > 0 ? (detail.draws / comp) * 100 : 0;
+      const sBar = comp > 0 ? (detail.server_wins / comp) * 100 : 0;
+      document.getElementById('bar-client').style.width = `${cBar}%`;
+      document.getElementById('bar-draw').style.width = `${dBar}%`;
+      document.getElementById('bar-server').style.width = `${sBar}%`;
+
+      applyWinnerPill(document.getElementById('battle-winner-badge'), detail.winner_side, detail.winner_label);
+
+      const listEl = document.getElementById('battle-games-list');
+      listEl.innerHTML = '';
+      const games = detail.games || [];
+      if (games.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.fontSize = '0.75rem';
+        empty.style.color = 'var(--muted)';
+        empty.textContent = 'No games in this battle yet. Click "+ New Game" to play!';
+        listEl.appendChild(empty);
+      } else {
+        games.forEach(g => {
+          const row = document.createElement('div');
+          const isSelected = currentGame && currentGame.game_id === g.game_id;
+          row.className = 'battle-game-row' + (isSelected ? ' active' : '');
+          const formattedName = formatMatchPrefix(g);
+          const pillClass = g.winner_side === 'CLIENT'
+            ? 'pill-client'
+            : g.winner_side === 'SERVER'
+            ? 'pill-server'
+            : g.winner_side === 'DRAW'
+            ? 'pill-tie'
+            : 'pill-ongoing';
+          const shortWin = g.winner_side === 'CLIENT'
+            ? `🏆 CLIENT (${g.participant || 'Client'})`
+            : g.winner_side === 'SERVER'
+            ? `🤖 SERVER (${g.opponent_agent || 'Server'})`
+            : g.winner_side === 'DRAW'
+            ? '🤝 DRAW'
+            : `⏳ ONGOING (${g.move_count}m)`;
+          row.innerHTML = `
+            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:215px;" title="${formattedName} [${g.game_id}]">${formattedName}</span>
+            <span class="winner-pill ${pillClass}">${shortWin}</span>
+          `;
+          row.onclick = () => loadGame(g.game_id);
+          listEl.appendChild(row);
+        });
+      }
+    }
+
+    async function refreshBattlesAndGames(selectedBattleId, selectedGameId) {
+      const bRes = await fetch('/api/v1/battles');
+      if (bRes.ok) {
+        const bData = await bRes.json();
+        const battles = bData.battles || [];
+        const bSel = document.getElementById('battle-select');
+        bSel.innerHTML = '';
+        if (selectedBattleId) {
+          currentBattleId = selectedBattleId;
+        } else if (!battles.some(b => b.battle_id === currentBattleId) && battles.length > 0) {
+          currentBattleId = battles[battles.length - 1].battle_id;
+        }
+        battles.forEach(b => {
+          const opt = document.createElement('option');
+          opt.value = b.battle_id;
+          const winTag = b.winner_side === 'CLIENT'
+            ? '🏆 CLIENT WON'
+            : b.winner_side === 'SERVER'
+            ? '🤖 SERVER WON'
+            : b.winner_side === 'TIE'
+            ? '🤝 TIE'
+            : '⏳ ONGOING';
+          opt.textContent = `${b.name} — ${b.participant} [${winTag}: C ${b.client_wins} - S ${b.server_wins} - D ${b.draws}]`;
+          if (b.battle_id === currentBattleId) opt.selected = true;
+          bSel.appendChild(opt);
+        });
+      }
+
+      const dRes = await fetch(`/api/v1/battles/${encodeURIComponent(currentBattleId)}`);
+      if (dRes.ok) {
+        const detail = await dRes.json();
+        renderBattleStatistics(detail);
+
+        const sel = document.getElementById('game-select');
+        sel.innerHTML = '';
+        (detail.games || []).forEach(g => {
+          const opt = document.createElement('option');
+          opt.value = g.game_id;
+          const formattedName = formatMatchPrefix(g);
+          const label = formattedName !== g.game_id ? `${formattedName} [${g.game_id}]` : formattedName;
+          const winSideText = g.winner_side === 'CLIENT'
+            ? 'CLIENT WON'
+            : g.winner_side === 'SERVER'
+            ? 'SERVER WON'
+            : g.status;
+          opt.textContent = `${label} (${winSideText}, ${g.move_count} moves)`;
+          if (g.game_id === selectedGameId) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      }
     }
 
     async function loadGame(gameId, jumpToStart = false) {
@@ -535,11 +844,27 @@
       const res = await fetch(`/api/v1/games/${encodeURIComponent(gameId)}`);
       if (!res.ok) return;
       currentGame = await res.json();
+      if (currentGame.battle_id) {
+        currentBattleId = currentGame.battle_id;
+      }
       const nameInput = document.getElementById('match-name-input');
       if (nameInput) nameInput.value = formatMatchPrefix(currentGame);
-      await refreshGameList(currentGame.game_id);
+      await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
       const total = (currentGame.history || []).length;
       setReplayPly(jumpToStart ? 0 : total);
+    }
+
+    async function loadBattle(battleId) {
+      currentBattleId = battleId;
+      await refreshBattlesAndGames(battleId, currentGame ? currentGame.game_id : '');
+      if (currentBattleDetail && currentBattleDetail.games && currentBattleDetail.games.length > 0) {
+        const hasCurrent = currentGame && currentBattleDetail.games.some(g => g.game_id === currentGame.game_id);
+        if (!hasCurrent) {
+          await loadGame(currentBattleDetail.games[currentBattleDetail.games.length - 1].game_id);
+        } else {
+          updateHUDAndMoveList();
+        }
+      }
     }
 
     let isBusy = false;
@@ -558,7 +883,7 @@
         if (res.ok) {
           const data = await res.json();
           currentGame = data.state;
-          await refreshGameList(currentGame.game_id);
+          await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
           setReplayPly((currentGame.history || []).length);
         }
       } finally {
@@ -581,7 +906,7 @@
         if (res.ok) {
           const data = await res.json();
           currentGame = data.state;
-          await refreshGameList(currentGame.game_id);
+          await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
           setReplayPly((currentGame.history || []).length);
         }
       } finally {
@@ -604,20 +929,65 @@
       });
       if (res.ok) {
         currentGame = await res.json();
-        await refreshGameList(currentGame.game_id);
+        await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
         setReplayPly((currentGame.history || []).length);
       }
     }
 
     // Event Listeners
+    document.getElementById('battle-select').onchange = (e) => loadBattle(e.target.value);
+    document.getElementById('btn-refresh-battles').onclick = () => refreshBattlesAndGames(currentBattleId, currentGame ? currentGame.game_id : '');
+    document.getElementById('btn-new-battle').onclick = async () => {
+      const bNameInput = document.getElementById('battle-name-input');
+      const bPartInput = document.getElementById('battle-participant-input');
+      const agent = document.getElementById('ai-agent-select').value;
+      const name = bNameInput ? bNameInput.value.trim() : '';
+      const participant = bPartInput && bPartInput.value.trim() ? bPartInput.value.trim() : 'Client Player';
+      const res = await fetch('/api/v1/battles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, participant, opponent_agent: agent })
+      });
+      if (res.ok) {
+        const battle = await res.json();
+        if (bNameInput) bNameInput.value = '';
+        currentBattleId = battle.battle_id;
+        // Automatically create the first game in this new battle
+        const gRes = await fetch(`/api/v1/battles/${encodeURIComponent(battle.battle_id)}/games`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: `${battle.name} - Game 1`,
+            participant: battle.participant,
+            opponent_agent: agent,
+            human_player: 1
+          })
+        });
+        if (gRes.ok) {
+          const g = await gRes.json();
+          await loadGame(g.game_id);
+        } else {
+          await loadBattle(battle.battle_id);
+        }
+      }
+    };
+
     document.getElementById('game-select').onchange = (e) => loadGame(e.target.value);
     document.getElementById('btn-new-game').onclick = async () => {
       const nameInput = document.getElementById('match-name-input');
       const customName = nameInput ? nameInput.value.trim() : '';
-      const res = await fetch('/api/v1/games', {
+      const agent = document.getElementById('ai-agent-select').value;
+      const participant = currentBattleDetail ? currentBattleDetail.participant : 'Client Player';
+      const res = await fetch(`/api/v1/battles/${encodeURIComponent(currentBattleId)}/games`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: customName })
+        body: JSON.stringify({
+          name: customName,
+          battle_id: currentBattleId,
+          participant,
+          opponent_agent: agent,
+          human_player: 1
+        })
       });
       if (res.ok) {
         const g = await res.json();
@@ -636,7 +1006,7 @@
       });
       if (res.ok) {
         currentGame = await res.json();
-        await refreshGameList(currentGame.game_id);
+        await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
         updateHUDAndMoveList();
       }
     };
@@ -645,7 +1015,7 @@
       const res = await fetch(`/api/v1/games/${encodeURIComponent(currentGame.game_id)}/reset`, { method: 'POST' });
       if (res.ok) {
         currentGame = await res.json();
-        await refreshGameList(currentGame.game_id);
+        await refreshBattlesAndGames(currentBattleId, currentGame.game_id);
         setReplayPly(0);
       }
     };
