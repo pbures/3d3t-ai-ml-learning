@@ -7,11 +7,12 @@ import (
 	"math"
 	"math/bits"
 	"sync"
+	"time"
 
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
 )
 
-const stemChannels = 11
+const stemChannels = 19
 
 //go:embed weights/ttt3d_latest.bin
 var embeddedTTT3DWeights []byte
@@ -271,7 +272,7 @@ func extractGeometricFeatures(input [engine.CanonicalTensorSize]float32) [stemCh
 	}
 	occMask := myMask | oppMask
 
-	var cellMy3, cellOpp3, cellMy2, cellOpp2 [64]float32
+	var cellMy3, cellOpp3, cellMy2, cellOpp2, cellMy1, cellOpp1 [64]float32
 	for _, mask := range engine.WinMasks {
 		myBits := myMask & mask
 		oppBits := oppMask & mask
@@ -289,6 +290,11 @@ func extractGeometricFeatures(input [engine.CanonicalTensorSize]float32) [stemCh
 					b := bits.TrailingZeros64(rem)
 					cellMy2[b] += 1.0
 				}
+			case 1:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellMy1[b] += 1.0
+				}
 			}
 		}
 		if myBits == 0 {
@@ -303,6 +309,52 @@ func extractGeometricFeatures(input [engine.CanonicalTensorSize]float32) [stemCh
 					b := bits.TrailingZeros64(rem)
 					cellOpp2[b] += 1.0
 				}
+			case 1:
+				for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+					b := bits.TrailingZeros64(rem)
+					cellOpp1[b] += 1.0
+				}
+			}
+		}
+	}
+
+	var myT3Mask, oppT3Mask uint64
+	for b := 0; b < 64; b++ {
+		if cellMy3[b] > 0.5 {
+			myT3Mask |= uint64(1) << b
+		}
+		if cellOpp3[b] > 0.5 {
+			oppT3Mask |= uint64(1) << b
+		}
+	}
+
+	myStackAdjMask := (((myT3Mask &^ oppT3Mask) << 16) | (myT3Mask >> 16)) &^ occMask &^ oppT3Mask
+	oppStackAdjMask := (((oppT3Mask &^ myT3Mask) << 16) | (oppT3Mask >> 16)) &^ occMask &^ myT3Mask
+
+	var cellMyStack, cellOppStack [64]float32
+	for b := 0; b < 64; b++ {
+		bit := uint64(1) << b
+		if (myT3Mask & myStackAdjMask & bit) != 0 {
+			cellMyStack[b] += 1.0
+		}
+		if (oppT3Mask & oppStackAdjMask & bit) != 0 {
+			cellOppStack[b] += 1.0
+		}
+	}
+	for _, mask := range engine.WinMasks {
+		myBits := myMask & mask
+		oppBits := oppMask & mask
+		emptyOnLine := mask &^ occMask
+		if oppBits == 0 && bits.OnesCount64(myBits) == 2 && (emptyOnLine&myStackAdjMask) != 0 {
+			for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+				b := bits.TrailingZeros64(rem)
+				cellMyStack[b] += 1.0
+			}
+		}
+		if myBits == 0 && bits.OnesCount64(oppBits) == 2 && (emptyOnLine&oppStackAdjMask) != 0 {
+			for rem := emptyOnLine; rem != 0; rem &= rem - 1 {
+				b := bits.TrailingZeros64(rem)
+				cellOppStack[b] += 1.0
 			}
 		}
 	}
@@ -344,6 +396,55 @@ func extractGeometricFeatures(input [engine.CanonicalTensorSize]float32) [stemCh
 			o2 = 4.0
 		}
 		out[10*64+b] = o2 * 0.25
+
+		// Channel 11: 2nd-ply gravity surface (z = h + 1)
+		if b >= 16 && (surfMask&(uint64(1)<<(b-16))) != 0 {
+			out[11*64+b] = 1.0
+		}
+		// Channel 12: 3rd-ply gravity surface (z = h + 2)
+		if b >= 32 && (surfMask&(uint64(1)<<(b-32))) != 0 {
+			out[12*64+b] = 1.0
+		}
+		// Channel 13: Active player stacked vertical fork builder & target volume
+		ms := cellMyStack[b]
+		if ms > 2.0 {
+			ms = 2.0
+		}
+		out[13*64+b] = ms * 0.5
+
+		// Channel 14: Opponent stacked vertical fork builder & target volume
+		os := cellOppStack[b]
+		if os > 2.0 {
+			os = 2.0
+		}
+		out[14*64+b] = os * 0.5
+
+		// Channel 15: Active player multi-line fork intersections
+		if cellMy2[b] > 1.5 || (cellMy2[b] > 0.5 && cellMy3[b] > 0.5) {
+			out[15*64+b] = 1.0
+		}
+		// Channel 16: Opponent multi-line fork intersections
+		if cellOpp2[b] > 1.5 || (cellOpp2[b] > 0.5 && cellOpp3[b] > 0.5) {
+			out[16*64+b] = 1.0
+		}
+		// Channel 17: Upper-column 2-ply/3-ply trap & Zugzwang danger on surface
+		if isSurf {
+			var trap float32
+			if b < 32 && cellOpp3[b+32] > 0.5 {
+				trap = 1.0
+			} else if b < 48 && cellOpp2[b+16] > 1.5 {
+				trap = 0.5
+			}
+			out[17*64+b] = trap
+		}
+		// Channel 18: Net open 1-in-a-row ray balance per empty cell
+		diff1 := (cellMy1[b] - cellOpp1[b]) * 0.2
+		if diff1 > 1.0 {
+			diff1 = 1.0
+		} else if diff1 < -1.0 {
+			diff1 = -1.0
+		}
+		out[18*64+b] = diff1
 	}
 	return out
 }
@@ -439,6 +540,7 @@ func (m *TTT3DModel) PredictGame(g *engine.Game) (probs [16]float32, value float
 // (`UseTacticalLookahead: false`) or Hybrid `NeuralArenaBot` mode (`UseTacticalLookahead: true`).
 type TTT3DNetAgent struct {
 	UseTacticalLookahead bool
+	CustomName           string
 	model                *TTT3DModel
 }
 
@@ -451,7 +553,20 @@ func NewTTT3DNetAgent(useTacticalLookahead bool) *TTT3DNetAgent {
 	}
 }
 
+// NewTTT3DNetAgentWithName creates a TTT3DNetAgent with an explicit model identifier (e.g. "ttt3d-deep-gray1").
+func NewTTT3DNetAgentWithName(name string, useTacticalLookahead bool) *TTT3DNetAgent {
+	m, _ := DefaultTTT3DModel()
+	return &TTT3DNetAgent{
+		UseTacticalLookahead: useTacticalLookahead,
+		CustomName:           name,
+		model:                m,
+	}
+}
+
 func (a *TTT3DNetAgent) Name() string {
+	if a.CustomName != "" {
+		return a.CustomName
+	}
 	if a.UseTacticalLookahead {
 		return "ttt3dnet"
 	}
@@ -581,7 +696,7 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 		candidates = nonForkVulnerable
 	}
 
-	// 6. Hybrid Neural Policy + 1-Ply Value + 3-Ply Bitboard Tactical Search over candidate moves
+	// 6. Hybrid Neural Policy + 1-Ply Value + Deep Check-Extended Bitboard PVS over candidate moves
 	hasNonCeilingCandidate := false
 	for _, act := range candidates {
 		if z, ok := g.LandingZ(act); ok && z < 3 {
@@ -590,16 +705,34 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 		}
 	}
 
-	ab := AlphaBetaAgent{MaxDepth: 3}
+	myBB := g.White
+	oppBB := g.Black
+	if me == engine.PlayerBlack {
+		myBB = g.Black
+		oppBB = g.White
+	}
+	rootHash := computeZobristHash(myBB, oppBB)
+	searcher := newDeepSearcher(time.Time{}, false)
+	searcher.lmrScale = 2
+	searchDepth := 9
+	if a.CustomName == "ttt3d-deep-gray1" {
+		searchDepth = 11
+	}
+
 	bestCandidate := candidates[0]
 	bestCombined := float32(-1e9)
 	for _, act := range candidates {
 		zLand, _ := g.LandingZ(act)
+		bit := act + 16*zLand
 		clone := g.Clone()
 		_, _ = clone.ApplyMove(act)
 		_, oppVal := a.model.PredictGame(clone)
 		myNextVal := -oppVal
-		abVal := -ab.negamax(clone, 2, -1_000_000, 1_000_000)
+
+		newMy := myBB | (uint64(1) << bit)
+		nextHash := rootHash ^ zobristPiece[0][bit] ^ zobristTurn
+		abVal := -searcher.pvs(oppBB, newMy, g.MoveCount+1, 1, searchDepth, -1_000_000, 1_000_000, nextHash, 1, 0)
+
 		immThreats := len(FindImmediateWinningActions(clone, me))
 		threatBonus := float32(0.15) * float32(immThreats)
 		// P8 Anti-Passivity: avoid burning safe ceiling moves (z=3) unless creating an immediate threat
@@ -607,7 +740,23 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 		if hasNonCeilingCandidate && zLand == 3 && immThreats == 0 {
 			ceilingPenalty = 0.35
 		}
-		combined := probs[act] + 0.5*myNextVal + threatBonus + 0.008*float32(abVal) - ceilingPenalty
+
+		// Prevent neural prior dilution when multi-ply search detects a forced win/loss or stacked fork
+		var tacticalScore float32
+		switch {
+		case abVal >= ScoreWin/2:
+			tacticalScore = 50.0 + float32(abVal)*0.0001
+		case abVal <= ScoreLoss/2:
+			tacticalScore = -50.0 + float32(abVal)*0.0001
+		case abVal >= 2000:
+			tacticalScore = 4.0 + 0.004*float32(abVal-2000)
+		case abVal <= -2000:
+			tacticalScore = -4.5 + 0.004*float32(abVal+2000)
+		default:
+			tacticalScore = 0.012 * float32(abVal)
+		}
+
+		combined := probs[act] + 0.65*myNextVal + threatBonus + tacticalScore - ceilingPenalty
 		if combined > bestCombined {
 			bestCombined = combined
 			bestCandidate = act

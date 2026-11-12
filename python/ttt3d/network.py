@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 IN_CHANNELS = 3
-GEO_CHANNELS = 8
+GEO_CHANNELS = 16
 STEM_CHANNELS = IN_CHANNELS + GEO_CHANNELS
 GRID_DIM = 4
 GRID_CELLS = 64
@@ -66,9 +66,9 @@ _WIN_LINE_MATRIX: torch.Tensor = _build_win_line_matrix()
 
 
 def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
-    """Augments canonical (B, 3, 4, 4, 4) input with 8 exact 76-line geometric ray feature planes.
+    """Augments canonical (B, 3, 4, 4, 4) input with 16 exact 76-line & multi-ply gravity feature planes.
 
-    Returns a (B, 11, 4, 4, 4) volumetric tensor:
+    Returns a (B, 19, 4, 4, 4) volumetric tensor:
       - Channels 0..2: Raw canonical planes (MyPieces, OpponentPieces, GravitySurface)
       - Channel 3: Immediate 1-ply winning cells on the gravity surface
       - Channel 4: Immediate 1-ply opponent threat (forced 4th-ball block) cells on gravity surface
@@ -78,6 +78,14 @@ def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
       - Channel 8: Volumetric density of opponent unblocked 3-in-a-row empty completion cells
       - Channel 9: Volumetric density of own open 2-in-a-row fork/threat lines per empty cell
       - Channel 10: Volumetric density of opponent open 2-in-a-row fork/threat lines per empty cell
+      - Channel 11: 2nd-ply gravity landing surface (z = h + 1)
+      - Channel 12: 3rd-ply gravity landing surface (z = h + 2)
+      - Channel 13: Volumetric density of own stacked vertical fork builder & target cells
+      - Channel 14: Volumetric density of opponent stacked vertical fork builder & target cells
+      - Channel 15: Volumetric multi-line fork intersection cells for active player
+      - Channel 16: Volumetric multi-line fork intersection cells for opponent
+      - Channel 17: Upper-column 2-ply/3-ply trap & Zugzwang danger on the gravity surface
+      - Channel 18: Net open 1-in-a-row ray balance per empty cell
     """
     bsz = x.size(0)
     w_mat = _WIN_LINE_MATRIX.to(device=x.device, dtype=x.dtype)  # (76, 64)
@@ -88,6 +96,7 @@ def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
     opp = (flat[:, 1, :] > 0.5).to(x.dtype)
     surf = (flat[:, 2, :] > 0.5).to(x.dtype)
     empty = ((my < 0.5) & (opp < 0.5)).to(x.dtype)
+    empty_3d = empty.reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
 
     my_cnt = torch.matmul(my, w_mat_t)    # (B, 76)
     opp_cnt = torch.matmul(opp, w_mat_t)  # (B, 76)
@@ -99,11 +108,15 @@ def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
     l_opp3 = ((opp_cnt > 2.5) & (opp_cnt < 3.5) & opp_open).to(x.dtype)
     l_my2 = ((my_cnt > 1.5) & (my_cnt < 2.5) & my_open).to(x.dtype)
     l_opp2 = ((opp_cnt > 1.5) & (opp_cnt < 2.5) & opp_open).to(x.dtype)
+    l_my1 = ((my_cnt > 0.5) & (my_cnt < 1.5) & my_open).to(x.dtype)
+    l_opp1 = ((opp_cnt > 0.5) & (opp_cnt < 1.5) & opp_open).to(x.dtype)
 
     cell_my3 = (empty * torch.matmul(l_my3, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
     cell_opp3 = (empty * torch.matmul(l_opp3, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
     cell_my2 = (empty * torch.matmul(l_my2, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
     cell_opp2 = (empty * torch.matmul(l_opp2, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    cell_my1 = (empty * torch.matmul(l_my1, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
+    cell_opp1 = (empty * torch.matmul(l_opp1, w_mat)).reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
     surf_3d = surf.reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM)
 
     imm_win_surf = surf_3d * (cell_my3 > 0.5).to(x.dtype)
@@ -120,6 +133,58 @@ def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
     my2_vol = torch.clamp(cell_my2, max=4.0) * 0.25
     opp2_vol = torch.clamp(cell_opp2, max=4.0) * 0.25
 
+    # Channels 11..12: 2nd-ply (z = h+1) and 3rd-ply (z = h+2) gravity landing horizons
+    next_surf_2ply = torch.zeros_like(surf_3d)
+    next_surf_2ply[:, 1:, :, :] = surf_3d[:, :3, :, :]
+
+    upper_surf_3ply = torch.zeros_like(surf_3d)
+    upper_surf_3ply[:, 2:, :, :] = surf_3d[:, :2, :, :]
+
+    # Channels 13..14: Stacked vertical fork targets & completion lines for both players
+    my_t3_bool = cell_my3 > 0.5
+    opp_t3_bool = cell_opp3 > 0.5
+
+    my_stack_adj = torch.zeros_like( empty_3d, dtype=torch.bool)
+    my_stack_adj[:, 1:, :, :] |= my_t3_bool[:, :3, :, :] & (~opp_t3_bool[:, :3, :, :])
+    my_stack_adj[:, :3, :, :] |= my_t3_bool[:, 1:, :, :]
+    my_stack_adj &= (empty_3d > 0.5) & (~opp_t3_bool)
+    my_stack_adj_f = my_stack_adj.to(x.dtype).reshape(bsz, GRID_CELLS)
+    l_my_stack = l_my2 * (torch.matmul(my_stack_adj_f, w_mat_t) > 0.5).to(x.dtype)
+    cell_my_stack = empty * torch.matmul(l_my_stack, w_mat) + (
+        my_t3_bool.to(x.dtype).reshape(bsz, GRID_CELLS) * my_stack_adj_f
+    )
+    my_stack_fork_vol = torch.clamp(
+        cell_my_stack.reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM), max=2.0
+    ) * 0.5
+
+    opp_stack_adj = torch.zeros_like(empty_3d, dtype=torch.bool)
+    opp_stack_adj[:, 1:, :, :] |= opp_t3_bool[:, :3, :, :] & (~my_t3_bool[:, :3, :, :])
+    opp_stack_adj[:, :3, :, :] |= opp_t3_bool[:, 1:, :, :]
+    opp_stack_adj &= (empty_3d > 0.5) & (~my_t3_bool)
+    opp_stack_adj_f = opp_stack_adj.to(x.dtype).reshape(bsz, GRID_CELLS)
+    l_opp_stack = l_opp2 * (torch.matmul(opp_stack_adj_f, w_mat_t) > 0.5).to(x.dtype)
+    cell_opp_stack = empty * torch.matmul(l_opp_stack, w_mat) + (
+        opp_t3_bool.to(x.dtype).reshape(bsz, GRID_CELLS) * opp_stack_adj_f
+    )
+    opp_stack_fork_vol = torch.clamp(
+        cell_opp_stack.reshape(bsz, GRID_DIM, GRID_DIM, GRID_DIM), max=2.0
+    ) * 0.5
+
+    # Channels 15..16: Multi-line fork intersection cells
+    my_fork_intersect_vol = ((cell_my2 > 1.5) | ((cell_my2 > 0.5) & (cell_my3 > 0.5))).to(x.dtype)
+    opp_fork_intersect_vol = ((cell_opp2 > 1.5) | ((cell_opp2 > 0.5) & (cell_opp3 > 0.5))).to(x.dtype)
+
+    # Channel 17: Upper-column 2-ply/3-ply trap & Zugzwang danger on the gravity surface
+    upper_trap_surf = torch.zeros_like(surf_3d)
+    upper_trap_surf[:, :2, :, :] = surf_3d[:, :2, :, :] * (cell_opp3[:, 2:, :, :] > 0.5).to(x.dtype)
+    upper_trap_surf[:, :3, :, :] = torch.maximum(
+        upper_trap_surf[:, :3, :, :],
+        surf_3d[:, :3, :, :] * (cell_opp2[:, 1:, :, :] > 1.5).to(x.dtype) * 0.5,
+    )
+
+    # Channel 18: Net open 1-in-a-row ray balance per empty cell
+    open1_diff_vol = torch.clamp((cell_my1 - cell_opp1) * 0.2, min=-1.0, max=1.0)
+
     geo = torch.stack(
         [
             imm_win_surf,
@@ -130,6 +195,14 @@ def extract_geometric_features(x: torch.Tensor) -> torch.Tensor:
             opp3_vol,
             my2_vol,
             opp2_vol,
+            next_surf_2ply,
+            upper_surf_3ply,
+            my_stack_fork_vol,
+            opp_stack_fork_vol,
+            my_fork_intersect_vol,
+            opp_fork_intersect_vol,
+            upper_trap_surf,
+            open1_diff_vol,
         ],
         dim=1,
     )

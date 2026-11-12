@@ -27,7 +27,7 @@ func TestCellLineCountsGeometry(t *testing.T) {
 }
 
 func TestAgentFactoryAndTerminalErrors(t *testing.T) {
-	for _, name := range []string{"random", "heuristic", "alphabeta", "minimax", "mcts", "ttt3dnet", "ttt3dnet-pure"} {
+	for _, name := range []string{"random", "heuristic", "alphabeta", "minimax", "deep", "alphabeta-deep", "mcts", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "ttt3dnet", "ttt3dnet-pure"} {
 		ag, err := NewAgentByName(name, 42)
 		if err != nil || ag == nil || ag.Name() == "" {
 			t.Fatalf("NewAgentByName(%q) failed: %v", name, err)
@@ -228,8 +228,8 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultTTT3DModel failed: %v", err)
 	}
-	if model.Channels != 32 || model.NumBlocks != 2 {
-		t.Fatalf("expected Channels=32, NumBlocks=2, got %d, %d", model.Channels, model.NumBlocks)
+	if model.Channels != 32 || model.NumBlocks != 3 {
+		t.Fatalf("expected Channels=32, NumBlocks=3, got %d, %d", model.Channels, model.NumBlocks)
 	}
 
 	// Verify exact parity with PyTorch reference forward pass on sample tensor
@@ -245,14 +245,14 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 	input[2*64+16+5] = 1.0
 
 	logits, val := model.Forward(input)
-	expectedLogits := [4]float32{-0.457250, -2.411903, -2.051143, 1.404457}
+	expectedLogits := [4]float32{0.498583, -1.392628, -1.506592, 1.749612}
 	for i := 0; i < 4; i++ {
 		if math.Abs(float64(logits[i]-expectedLogits[i])) > 1e-4 {
 			t.Fatalf("logit[%d] mismatch: got %.6f, expected %.6f", i, logits[i], expectedLogits[i])
 		}
 	}
-	if math.Abs(float64(val - -0.036816)) > 1e-4 {
-		t.Fatalf("value mismatch: got %.6f, expected -0.036816", val)
+	if math.Abs(float64(val - -0.028315)) > 1e-4 {
+		t.Fatalf("value mismatch: got %.6f, expected -0.028315", val)
 	}
 
 	// Verify dormant stacked vertical fork detection (z=1 and z=2 in col 0 while col 0 is empty at h=0)
@@ -346,5 +346,65 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 	}
 	if _, err := hybrid.SelectAction(gDone); !errors.Is(err, ErrNoValidMoves) {
 		t.Fatalf("expected ErrNoValidMoves on finished game, got %v", err)
+	}
+}
+
+func TestDeepSearchAgentAdaptiveDepthAndTiming(t *testing.T) {
+	// 1. Default ~1.5s adaptive deep search agent reaches depth >= 15 in ~1.5s
+	deepDefault := NewDeepSearchAgent(0, 0)
+	if deepDefault.Name() != "deep" || deepDefault.MinDepth != 15 {
+		t.Fatalf("unexpected default DeepSearchAgent config: name=%s minDepth=%d", deepDefault.Name(), deepDefault.MinDepth)
+	}
+
+	g := engine.NewGame()
+	for _, m := range []uint8{5, 6, 9, 10, 0, 3} {
+		_, _ = g.ApplyMove(m)
+	}
+	act, policy, val, err := deepDefault.SearchWithPolicy(g)
+	if err != nil || act >= 16 {
+		t.Fatalf("DeepSearchAgent.SearchWithPolicy failed: act=%d err=%v", act, err)
+	}
+	t.Logf("DeepSearchAgent default move: act=%d depth=%d nodes=%d elapsed=%v val=%.3f",
+		act, deepDefault.LastDepthReached, deepDefault.LastNodesVisited, deepDefault.LastElapsed, val)
+	if deepDefault.LastDepthReached < 15 {
+		t.Fatalf("expected DeepSearchAgent to reach depth >= 15, got %d", deepDefault.LastDepthReached)
+	}
+	if deepDefault.LastElapsed < 1200_000_000 || deepDefault.LastElapsed > 2200_000_000 {
+		t.Fatalf("expected DeepSearchAgent move computation around 1.5s, got %v", deepDefault.LastElapsed)
+	}
+	var pSum float32
+	for _, p := range policy {
+		pSum += p
+	}
+	if math.Abs(float64(pSum-1.0)) > 1e-4 {
+		t.Fatalf("expected root policy to sum to 1.0, got %f", pSum)
+	}
+
+	// 2. Fast teacher mode (EnforceFullTime=false) also reaches depth >= 15 and solves 1-ply win/block/terminal
+	fastDeep := NewDeepSearchAgent(100_000_000, 15)
+	fastDeep.EnforceFullTime = false
+
+	gWin := engine.NewGame()
+	for _, m := range []uint8{0, 4, 1, 5, 2, 6} {
+		_, _ = gWin.ApplyMove(m)
+	}
+	if wAct, _, wVal, err := fastDeep.SearchWithPolicy(gWin); err != nil || wAct != 3 || wVal != 1.0 {
+		t.Fatalf("expected immediate win on 3 with val=1.0, got act=%d val=%f err=%v", wAct, wVal, err)
+	}
+
+	gBlock := engine.NewGame()
+	for _, m := range []uint8{0, 4, 1, 5, 2} {
+		_, _ = gBlock.ApplyMove(m)
+	}
+	if bAct, _, _, err := fastDeep.SearchWithPolicy(gBlock); err != nil || bAct != 3 {
+		t.Fatalf("expected forced block on 3, got act=%d err=%v", bAct, err)
+	}
+
+	gDone := engine.NewGame()
+	for _, a := range engine.GenerateDrawSequence() {
+		_, _ = gDone.ApplyMove(a)
+	}
+	if _, err := fastDeep.SelectAction(gDone); !errors.Is(err, ErrNoValidMoves) {
+		t.Fatalf("expected ErrNoValidMoves on terminal game, got %v", err)
 	}
 }
