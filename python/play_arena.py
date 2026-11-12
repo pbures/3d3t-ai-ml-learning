@@ -17,11 +17,15 @@ def main() -> None:
     parser.add_argument(
         "--opponent",
         default="heuristic",
-        choices=["random", "heuristic", "alphabeta", "mcts", "ttt3dnet", "ttt3dnet-pure"],
+        choices=["random", "heuristic", "alphabeta", "deep", "mcts", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "ttt3dnet", "ttt3dnet-pure"],
     )
     parser.add_argument("--games", type=int, default=4, help="Number of paired games to play")
     parser.add_argument("--prefix", default="", help="Optional game ID prefix for 3D Web UI replay list")
     parser.add_argument("--name", default="", help="Optional human-readable match name for the tournament")
+    parser.add_argument("--battle-id", default="", help="Optional existing or custom battle ID to group games under")
+    parser.add_argument("--battle-name", default="", help="Optional human-readable battle name")
+    parser.add_argument("--participant", default="TTT3DNet-Client", help="Client player / participant name in the battle")
+    parser.add_argument("--date", default="", help="Optional battle date (ISO-8601 or YYYY-MM-DD)")
     parser.add_argument("--insecure", action="store_true", help="Skip TLS certificate verification (for localhost)")
     args = parser.parse_args()
 
@@ -43,11 +47,16 @@ def main() -> None:
         mode="client",
         prefix=args.prefix,
         match_name=args.name,
+        battle_id=args.battle_id,
+        battle_name=args.battle_name,
+        participant=args.participant,
+        battle_date=args.date,
     )
     print(
-        f"Tournament complete on {args.arena_url} vs {args.opponent}: "
-        f"W={result['wins']} D={result['draws']} L={result['losses']} "
-        f"(Score: {result['win_rate']*100:.1f}%)"
+        f"Battle '{result.get('battle_name')}' (id={result.get('battle_id')}, participant={result.get('participant')}) "
+        f"complete on {args.arena_url} vs {args.opponent}:\n"
+        f"  Client Wins={result['wins']} | Draws={result['draws']} | Server Wins={result['losses']} "
+        f"(Client Score: {result['win_rate']*100:.1f}%) -> Battle Winner: {result.get('winner_label')}"
     )
     print(f"Games available for 3D step-by-step replay at {args.arena_url}: {result['game_ids']}")
 

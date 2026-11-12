@@ -57,38 +57,113 @@ type MCPCallToolResult struct {
 var mcpToolsCatalog = []MCPTool{
 	{
 		Name:        "list_models",
-		Description: "List all implemented 3T3D AI models (ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random) available on the Arena Server.",
+		Description: "List all implemented 3T3D AI models (ttt3d-deep-gray1, ttt3d-deep-gray1-pure, deep, ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random) available on the Arena Server.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
+		},
+	},
+	{
+		Name:        "list_battles",
+		Description: "List all 3T3D battles with their name, date, participant (client player), overall battle winner (CLIENT, SERVER, TIE, or ONGOING), and aggregate statistics.",
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	{
+		Name:        "create_battle",
+		Description: "Create a new 3T3D battle with a name, date, and participant (client player name) so the client can play multiple games in the battle and track aggregate battle statistics.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"battle_id":      map[string]interface{}{"type": "string", "description": "Optional custom battle ID slug"},
+				"name":           map[string]interface{}{"type": "string", "description": "Human-friendly battle title/name"},
+				"date":           map[string]interface{}{"type": "string", "description": "Battle date/timestamp (ISO-8601/RFC3339 or date string; defaults to current UTC time)"},
+				"participant":    map[string]interface{}{"type": "string", "description": "Name of the client player participating in the battle"},
+				"client_name":    map[string]interface{}{"type": "string", "description": "Alias for participant (client player name)"},
+				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional default server AI model for games in this battle"},
+			},
+		},
+	},
+	{
+		Name:        "get_battle",
+		Description: "Get battle metadata, statistics (total games, client wins, server wins, draws, win rates), battle winner (CLIENT or SERVER), and all games in the battle.",
+		InputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"battle_id"},
+			"properties": map[string]interface{}{
+				"battle_id": map[string]interface{}{"type": "string", "description": "Battle ID (e.g. 'default' or 'battle-1')"},
+			},
+		},
+	},
+	{
+		Name:        "update_battle",
+		Description: "Update a battle's name, date, participant (client player name), or default opponent AI model.",
+		InputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"battle_id"},
+			"properties": map[string]interface{}{
+				"battle_id":      map[string]interface{}{"type": "string", "description": "Battle ID"},
+				"name":           map[string]interface{}{"type": "string", "description": "Updated battle name"},
+				"date":           map[string]interface{}{"type": "string", "description": "Updated battle date"},
+				"participant":    map[string]interface{}{"type": "string", "description": "Updated client participant name"},
+				"client_name":    map[string]interface{}{"type": "string", "description": "Alias for participant"},
+				"opponent_agent": map[string]interface{}{"type": "string", "description": "Updated default AI opponent model"},
+			},
+		},
+	},
+	{
+		Name:        "create_battle_game",
+		Description: "Create a new game inside an existing battle so the client participant can play another game in that battle.",
+		InputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"battle_id"},
+			"properties": map[string]interface{}{
+				"battle_id":      map[string]interface{}{"type": "string", "description": "Battle ID to add the game to"},
+				"game_id":        map[string]interface{}{"type": "string", "description": "Optional custom game ID slug"},
+				"name":           map[string]interface{}{"type": "string", "description": "Human-friendly match title/name"},
+				"participant":    map[string]interface{}{"type": "string", "description": "Optional override for client player name"},
+				"white_name":     map[string]interface{}{"type": "string", "description": "Display name for White (Player 1)"},
+				"black_name":     map[string]interface{}{"type": "string", "description": "Display name for Black (Player 2)"},
+				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional AI model to play against automatically"},
+				"human_player":   map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "1 for Client to start first as White, 2 for Client to play second as Black (Server AI makes the opening White move)"},
+				"client_player":  map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "Which side the client controls (1=White, 2=Black)"},
+			},
 		},
 	},
 	{
 		Name:        "list_games",
-		Description: "List all active and completed 3T3D game sessions with their custom match names, players, status, and move counts.",
+		Description: "List all active and completed 3T3D game sessions with their battle_id, match names, players, status, winner_side (CLIENT or SERVER), and move counts.",
 		InputSchema: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{},
+			"type": "object",
+			"properties": map[string]interface{}{
+				"battle_id": map[string]interface{}{"type": "string", "description": "Optional battle_id to filter games belonging to a specific battle"},
+			},
 		},
 	},
 	{
 		Name:        "create_game",
-		Description: "Create a new 3T3D match with an optional custom match name, player names, opponent AI model, and starting side (human_player: 1 for White/first, 2 for Black/second where AI starts).",
+		Description: "Create a new 3T3D match (optionally associated with a battle_id and participant/client_name) with a custom match name, player names, opponent AI model, and starting side (human_player: 1 for White/first, 2 for Black/second where AI starts).",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"game_id":        map[string]interface{}{"type": "string", "description": "Optional custom game ID slug"},
+				"battle_id":      map[string]interface{}{"type": "string", "description": "Optional battle ID to organize this game under (defaults to 'default')"},
 				"name":           map[string]interface{}{"type": "string", "description": "Human-friendly match title/name"},
+				"participant":    map[string]interface{}{"type": "string", "description": "Client player name"},
+				"client_name":    map[string]interface{}{"type": "string", "description": "Alias for participant (client player name)"},
 				"white_name":     map[string]interface{}{"type": "string", "description": "Display name for White (Player 1)"},
 				"black_name":     map[string]interface{}{"type": "string", "description": "Display name for Black (Player 2)"},
-				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional AI model to play against automatically"},
+				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional AI model to play against automatically"},
 				"human_player":   map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "1 to start first as White, 2 to play second as Black (AI makes the opening White move immediately)"},
+				"client_player":  map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "Which side the client player controls (1=White, 2=Black)"},
 			},
 		},
 	},
 	{
 		Name:        "get_game",
-		Description: "Get the complete 3D board state, bitboards, canonical tensor, legal actions, and move history for a game session.",
+		Description: "Get the complete 3D board state, bitboards, canonical tensor, legal actions, winner_side (CLIENT or SERVER), and move history for a game session.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"game_id"},
@@ -99,13 +174,15 @@ var mcpToolsCatalog = []MCPTool{
 	},
 	{
 		Name:        "rename_game",
-		Description: "Rename an existing match or update its player names / configured opponent AI model.",
+		Description: "Rename an existing match or update its battle_id, participant, player names, or configured opponent AI model.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"game_id"},
 			"properties": map[string]interface{}{
 				"game_id":        map[string]interface{}{"type": "string", "description": "Game session ID"},
+				"battle_id":      map[string]interface{}{"type": "string", "description": "Updated battle ID"},
 				"name":           map[string]interface{}{"type": "string", "description": "New match title/name"},
+				"participant":    map[string]interface{}{"type": "string", "description": "Updated client player name"},
 				"white_name":     map[string]interface{}{"type": "string", "description": "Updated White player name"},
 				"black_name":     map[string]interface{}{"type": "string", "description": "Updated Black player name"},
 				"opponent_agent": map[string]interface{}{"type": "string", "description": "Updated AI opponent model (or empty string to disable auto-reply)"},
@@ -125,20 +202,20 @@ var mcpToolsCatalog = []MCPTool{
 				"x":              map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 3, "description": "Column X coordinate (0..3) when use_coords is true"},
 				"y":              map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 3, "description": "Column Y coordinate (0..3) when use_coords is true"},
 				"player":         map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "Optional turn verification (1=White, 2=Black)"},
-				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional AI model to reply immediately after this move"},
+				"opponent_agent": map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Optional AI model to reply immediately after this move"},
 				"auto_reply":     map[string]interface{}{"type": "boolean", "description": "Optional override for automatic AI reply"},
 			},
 		},
 	},
 	{
 		Name:        "trigger_ai_move",
-		Description: "Have one of the built-in AI models (ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random) make the next move in a game.",
+		Description: "Have one of the built-in AI models (ttt3d-deep-gray1, ttt3d-deep-gray1-pure, deep, ttt3dnet, ttt3dnet-pure, mcts, alphabeta, heuristic, random) make the next move in a game.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"game_id"},
 			"properties": map[string]interface{}{
 				"game_id": map[string]interface{}{"type": "string", "description": "Game session ID"},
-				"agent":   map[string]interface{}{"type": "string", "enum": []string{"ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "AI model to step (defaults to ttt3dnet)"},
+				"agent":   map[string]interface{}{"type": "string", "enum": []string{"ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "AI model to step (defaults to ttt3d-deep-gray1)"},
 			},
 		},
 	},
@@ -160,11 +237,14 @@ var mcpToolsCatalog = []MCPTool{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"game_id":       map[string]interface{}{"type": "string", "description": "Optional custom game ID"},
+				"battle_id":     map[string]interface{}{"type": "string", "description": "Optional battle ID to organize this match under"},
 				"name":          map[string]interface{}{"type": "string", "description": "Human-readable match title"},
+				"participant":   map[string]interface{}{"type": "string", "description": "Client player name"},
+				"client_player": map[string]interface{}{"type": "integer", "enum": []int{1, 2}, "description": "Which side the client player controls (1=White, 2=Black)"},
 				"white_name":    map[string]interface{}{"type": "string", "description": "White player display name"},
 				"black_name":    map[string]interface{}{"type": "string", "description": "Black player display name"},
-				"white_agent":   map[string]interface{}{"type": "string", "enum": []string{"", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Built-in model for White"},
-				"black_agent":   map[string]interface{}{"type": "string", "enum": []string{"", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Built-in model for Black"},
+				"white_agent":   map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Built-in model for White"},
+				"black_agent":   map[string]interface{}{"type": "string", "enum": []string{"", "ttt3d-deep-gray1", "ttt3d-deep-gray1-pure", "deep", "ttt3dnet", "ttt3dnet-pure", "mcts", "alphabeta", "heuristic", "random"}, "description": "Built-in model for Black"},
 				"white_bot_url": map[string]interface{}{"type": "string", "description": "Webhook URL for White if not using white_agent"},
 				"black_bot_url": map[string]interface{}{"type": "string", "description": "Webhook URL for Black if not using black_agent"},
 				"timeout_ms":    map[string]interface{}{"type": "integer", "description": "Per-move webhook timeout in ms"},
@@ -362,8 +442,39 @@ func (s *ArenaServer) handleMCPToolCall(w http.ResponseWriter, rpcReq MCPJSONRPC
 	case "list_models":
 		status, respBytes = s.invokeInternalAPI(http.MethodGet, "/api/v1/models", nil)
 
+	case "list_battles":
+		status, respBytes = s.invokeInternalAPI(http.MethodGet, "/api/v1/battles", nil)
+
+	case "create_battle":
+		status, respBytes = s.invokeInternalAPI(http.MethodPost, "/api/v1/battles", args)
+
+	case "get_battle":
+		bid := strArg("battle_id", "default")
+		status, respBytes = s.invokeInternalAPI(http.MethodGet, "/api/v1/battles/"+bid, nil)
+
+	case "update_battle":
+		bid := strArg("battle_id", "")
+		if bid == "" {
+			s.writeMCPToolResult(w, rpcReq.ID, http.StatusBadRequest, []byte(`{"error":"battle_id is required"}`))
+			return
+		}
+		status, respBytes = s.invokeInternalAPI(http.MethodPatch, "/api/v1/battles/"+bid, args)
+
+	case "create_battle_game":
+		bid := strArg("battle_id", "")
+		if bid == "" {
+			s.writeMCPToolResult(w, rpcReq.ID, http.StatusBadRequest, []byte(`{"error":"battle_id is required"}`))
+			return
+		}
+		status, respBytes = s.invokeInternalAPI(http.MethodPost, "/api/v1/battles/"+bid+"/games", args)
+
 	case "list_games":
-		status, respBytes = s.invokeInternalAPI(http.MethodGet, "/api/v1/games", nil)
+		bid := strArg("battle_id", "")
+		path := "/api/v1/games"
+		if bid != "" {
+			path += "?battle_id=" + bid
+		}
+		status, respBytes = s.invokeInternalAPI(http.MethodGet, path, nil)
 
 	case "create_game":
 		status, respBytes = s.invokeInternalAPI(http.MethodPost, "/api/v1/games", args)

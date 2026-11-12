@@ -36,10 +36,28 @@ type ModelInfoDTO struct {
 // BuiltinModels lists all implemented AI models available in the Arena Server.
 var BuiltinModels = []ModelInfoDTO{
 	{
-		ID:          "ttt3dnet",
-		Name:        "TTT3DNet Hybrid (3D ResNet + 2-Ply Tactical Shield)",
+		ID:          "ttt3d-deep-gray1",
+		Name:        "TTT3D Deep Gray 1 (19-Ch 3D ResNet + Deep PVS Lookahead)",
 		Type:        "neural_hybrid",
-		Description: "3D Residual CNN (Policy + Value dual head) combined with a 64-bit bitboard 2-ply fork shield and 1-ply value lookahead.",
+		Description: "Newly trained 19-channel 3D Residual CNN with multi-ply gravity & stacked-fork stem trained against 15+ ply search, paired with check-extended PVS tactical lookahead.",
+	},
+	{
+		ID:          "ttt3d-deep-gray1-pure",
+		Name:        "TTT3D Deep Gray 1 Pure (Raw 19-Ch 3D ResNet Forward Pass)",
+		Type:        "neural_pure",
+		Description: "Single-pass 19-channel 3D Residual CNN trained against 15+ ply search, selecting argmax over legal column policy probabilities with zero tree search.",
+	},
+	{
+		ID:          "deep",
+		Name:        "Deep Adaptive PVS Baseline (15+ Ply, ~1.5s / Move)",
+		Type:        "search",
+		Description: "Adaptive iterative-deepening Principal Variation Search with Zobrist transposition table, LMR, killer/history heuristics, and check extensions (~1.5s/move, 15+ plies).",
+	},
+	{
+		ID:          "ttt3dnet",
+		Name:        "TTT3DNet Hybrid (3D ResNet + Tactical Shield)",
+		Type:        "neural_hybrid",
+		Description: "3D Residual CNN (Policy + Value dual head) combined with a 64-bit bitboard 2-ply fork shield and multi-ply value lookahead.",
 	},
 	{
 		ID:          "ttt3dnet-pure",
@@ -86,7 +104,15 @@ type CoordDTO struct {
 // GameStateDTO is the full JSON representation of a 3T3D game session for remote bots and the 3D Web UI.
 type GameStateDTO struct {
 	GameID          string         `json:"game_id"`
+	BattleID        string         `json:"battle_id"`
+	BattleName      string         `json:"battle_name,omitempty"`
 	Name            string         `json:"name"`
+	Participant     string         `json:"participant"`
+	ClientName      string         `json:"client_name"`
+	ClientPlayer    uint8          `json:"client_player"`
+	ServerPlayer    uint8          `json:"server_player"`
+	WinnerSide      string         `json:"winner_side"`
+	WinnerLabel     string         `json:"winner_label"`
 	WhiteName       string         `json:"white_name"`
 	BlackName       string         `json:"black_name"`
 	OpponentAgent   string         `json:"opponent_agent,omitempty"`
@@ -111,7 +137,15 @@ type GameStateDTO struct {
 // GameSummaryDTO is a compact descriptor returned when listing games (`GET /api/v1/games`).
 type GameSummaryDTO struct {
 	GameID        string `json:"game_id"`
+	BattleID      string `json:"battle_id"`
+	BattleName    string `json:"battle_name,omitempty"`
 	Name          string `json:"name"`
+	Participant   string `json:"participant"`
+	ClientName    string `json:"client_name"`
+	ClientPlayer  uint8  `json:"client_player"`
+	ServerPlayer  uint8  `json:"server_player"`
+	WinnerSide    string `json:"winner_side"`
+	WinnerLabel   string `json:"winner_label"`
 	WhiteName     string `json:"white_name"`
 	BlackName     string `json:"black_name"`
 	OpponentAgent string `json:"opponent_agent,omitempty"`
@@ -121,19 +155,75 @@ type GameSummaryDTO struct {
 	CurrentPlayer uint8  `json:"current_player"`
 }
 
-// CreateGameRequest is the optional request body for `POST /api/v1/games`.
+// BattleSummaryDTO describes a battle (series of games) with its name, date, participant (client), winner, and statistics.
+type BattleSummaryDTO struct {
+	BattleID        string   `json:"battle_id"`
+	Name            string   `json:"name"`
+	Date            string   `json:"date"`
+	Participant     string   `json:"participant"`
+	ClientName      string   `json:"client_name"`
+	OpponentAgent   string   `json:"opponent_agent,omitempty"`
+	TotalGames      int      `json:"total_games"`
+	CompletedGames  int      `json:"completed_games"`
+	OngoingGames    int      `json:"ongoing_games"`
+	ClientWins      int      `json:"client_wins"`
+	ServerWins      int      `json:"server_wins"`
+	Draws           int      `json:"draws"`
+	ClientWinRate   float64  `json:"client_win_rate"`
+	ServerWinRate   float64  `json:"server_win_rate"`
+	ClientScoreRate float64  `json:"client_score_rate"`
+	WinnerSide      string   `json:"winner_side"`
+	WinnerLabel     string   `json:"winner_label"`
+	GameIDs         []string `json:"game_ids"`
+}
+
+// BattleDetailDTO returns the battle metadata, statistics, winner, and all games belonging to the battle.
+type BattleDetailDTO struct {
+	BattleSummaryDTO
+	Games []GameSummaryDTO `json:"games"`
+}
+
+// CreateBattleRequest is the request body for `POST /api/v1/battles`.
+type CreateBattleRequest struct {
+	BattleID      string `json:"battle_id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Date          string `json:"date,omitempty"`
+	Participant   string `json:"participant,omitempty"`
+	ClientName    string `json:"client_name,omitempty"`
+	PlayerName    string `json:"player_name,omitempty"`
+	OpponentAgent string `json:"opponent_agent,omitempty"`
+}
+
+// UpdateBattleRequest is the request body for `PATCH /api/v1/battles/{id}`.
+type UpdateBattleRequest struct {
+	Name          *string `json:"name,omitempty"`
+	Date          *string `json:"date,omitempty"`
+	Participant   *string `json:"participant,omitempty"`
+	ClientName    *string `json:"client_name,omitempty"`
+	OpponentAgent *string `json:"opponent_agent,omitempty"`
+}
+
+// CreateGameRequest is the optional request body for `POST /api/v1/games` and `POST /api/v1/battles/{id}/games`.
 type CreateGameRequest struct {
 	GameID        string `json:"game_id"`
+	BattleID      string `json:"battle_id,omitempty"`
 	Name          string `json:"name"`
+	Participant   string `json:"participant,omitempty"`
+	ClientName    string `json:"client_name,omitempty"`
 	WhiteName     string `json:"white_name"`
 	BlackName     string `json:"black_name"`
 	OpponentAgent string `json:"opponent_agent,omitempty"`
 	HumanPlayer   uint8  `json:"human_player,omitempty"`
+	ClientPlayer  uint8  `json:"client_player,omitempty"`
 }
 
 // UpdateGameRequest is the request body for `PATCH /api/v1/games/{id}` to rename a match or configure an AI opponent.
 type UpdateGameRequest struct {
+	BattleID      *string `json:"battle_id,omitempty"`
 	Name          *string `json:"name,omitempty"`
+	Participant   *string `json:"participant,omitempty"`
+	ClientName    *string `json:"client_name,omitempty"`
+	ClientPlayer  *uint8  `json:"client_player,omitempty"`
 	WhiteName     *string `json:"white_name,omitempty"`
 	BlackName     *string `json:"black_name,omitempty"`
 	OpponentAgent *string `json:"opponent_agent,omitempty"`
@@ -173,15 +263,19 @@ type AIMoveRequest struct {
 
 // RunMatchRequest is the JSON payload for `POST /api/v1/matches/run` to orchestrate a bot-vs-bot match.
 type RunMatchRequest struct {
-	GameID      string `json:"game_id"`
-	Name        string `json:"name,omitempty"`
-	WhiteName   string `json:"white_name"`
-	BlackName   string `json:"black_name"`
-	WhiteBotURL string `json:"white_bot_url,omitempty"`
-	BlackBotURL string `json:"black_bot_url,omitempty"`
-	WhiteAgent  string `json:"white_agent,omitempty"`
-	BlackAgent  string `json:"black_agent,omitempty"`
-	TimeoutMs   int    `json:"timeout_ms,omitempty"`
+	GameID       string `json:"game_id"`
+	BattleID     string `json:"battle_id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Participant  string `json:"participant,omitempty"`
+	ClientName   string `json:"client_name,omitempty"`
+	ClientPlayer uint8  `json:"client_player,omitempty"`
+	WhiteName    string `json:"white_name"`
+	BlackName    string `json:"black_name"`
+	WhiteBotURL  string `json:"white_bot_url,omitempty"`
+	BlackBotURL  string `json:"black_bot_url,omitempty"`
+	WhiteAgent   string `json:"white_agent,omitempty"`
+	BlackAgent   string `json:"black_agent,omitempty"`
+	TimeoutMs    int    `json:"timeout_ms,omitempty"`
 }
 
 // WinLineDTO describes one of the 76 winning lines for `GET /api/v1/winlines`.
@@ -192,9 +286,21 @@ type WinLineDTO struct {
 	Coords   []CoordDTO `json:"coords"`
 }
 
-type gameSession struct {
+type battleSession struct {
 	id            string
 	name          string
+	date          string
+	participant   string
+	opponentAgent string
+	seqOrder      uint64
+}
+
+type gameSession struct {
+	id            string
+	battleID      string
+	name          string
+	participant   string
+	clientPlayer  uint8
 	whiteName     string
 	blackName     string
 	opponentAgent string
@@ -204,26 +310,40 @@ type gameSession struct {
 // ArenaServer manages HTTP/HTTPS REST battle endpoints, remote bot matchmaking, and the 3D Web Replay UI.
 type ArenaServer struct {
 	mu         sync.RWMutex
+	battles    map[string]*battleSession
 	sessions   map[string]*gameSession
 	seqCounter uint64
+	battleSeq  uint64
 	httpClient *http.Client
 }
 
-// NewArenaServer creates and initializes an ArenaServer with a "default" game session.
+// NewArenaServer creates and initializes an ArenaServer with a "default" battle and "default" game session.
 func NewArenaServer(botHTTPClient *http.Client) *ArenaServer {
 	if botHTTPClient == nil {
 		botHTTPClient = &http.Client{Timeout: 5 * time.Second}
 	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
 	s := &ArenaServer{
+		battles:    make(map[string]*battleSession),
 		sessions:   make(map[string]*gameSession),
 		httpClient: botHTTPClient,
 	}
+	s.battles["default"] = &battleSession{
+		id:          "default",
+		name:        "Default Arena Battle",
+		date:        nowStr,
+		participant: "Client Player",
+		seqOrder:    0,
+	}
 	s.sessions["default"] = &gameSession{
-		id:        "default",
-		name:      "CW - default",
-		whiteName: "Player 1 (White)",
-		blackName: "Player 2 (Black)",
-		game:      engine.NewGame(),
+		id:           "default",
+		battleID:     "default",
+		name:         "CW - default",
+		participant:  "Client Player",
+		clientPlayer: 1,
+		whiteName:    "Player 1 (White)",
+		blackName:    "Player 2 (Black)",
+		game:         engine.NewGame(),
 	}
 	return s
 }
@@ -258,7 +378,206 @@ func formatMatchName(rawName string, serverStartsWhite bool) string {
 	return "CW - " + clean
 }
 
-func buildStateDTO(sess *gameSession) GameStateDTO {
+func resolveGameWinnerInfo(sess *gameSession, b *battleSession) (battleID, battleName, participant string, clientPlayer, serverPlayer uint8, winnerSide, winnerLabel string) {
+	battleID = sess.battleID
+	if battleID == "" {
+		battleID = "default"
+	}
+	participant = strings.TrimSpace(sess.participant)
+	if b != nil {
+		battleName = b.name
+		if participant == "" {
+			participant = b.participant
+		}
+	}
+	if participant == "" {
+		participant = "Client Player"
+	}
+
+	clientPlayer = sess.clientPlayer
+	if clientPlayer != 1 && clientPlayer != 2 {
+		if isServerWhitePlayer(sess.whiteName, sess.opponentAgent, 0) {
+			clientPlayer = 2
+		} else {
+			clientPlayer = 1
+		}
+	}
+	serverPlayer = 3 - clientPlayer
+
+	switch sess.game.Status {
+	case engine.StatusOngoing:
+		winnerSide = "ONGOING"
+		winnerLabel = "ONGOING"
+	case engine.StatusDraw:
+		winnerSide = "DRAW"
+		winnerLabel = "DRAW"
+	case engine.StatusWhiteWon, engine.StatusBlackWon:
+		if uint8(sess.game.Winner) == clientPlayer {
+			winnerSide = "CLIENT"
+			winnerLabel = fmt.Sprintf("CLIENT (%s)", participant)
+		} else {
+			winnerSide = "SERVER"
+			if sess.opponentAgent != "" {
+				winnerLabel = fmt.Sprintf("SERVER (%s)", sess.opponentAgent)
+			} else {
+				winnerLabel = "SERVER"
+			}
+		}
+	default:
+		winnerSide = "ONGOING"
+		winnerLabel = "ONGOING"
+	}
+	return
+}
+
+func (s *ArenaServer) buildGameSummaryLocked(sess *gameSession) GameSummaryDTO {
+	matchName := sess.name
+	if matchName == "" {
+		matchName = sess.id
+	}
+	b := s.battles[sess.battleID]
+	if b == nil {
+		b = s.battles["default"]
+	}
+	battleID, battleName, participant, clientPlayer, serverPlayer, winnerSide, winnerLabel := resolveGameWinnerInfo(sess, b)
+	return GameSummaryDTO{
+		GameID:        sess.id,
+		BattleID:      battleID,
+		BattleName:    battleName,
+		Name:          matchName,
+		Participant:   participant,
+		ClientName:    participant,
+		ClientPlayer:  clientPlayer,
+		ServerPlayer:  serverPlayer,
+		WinnerSide:    winnerSide,
+		WinnerLabel:   winnerLabel,
+		WhiteName:     sess.whiteName,
+		BlackName:     sess.blackName,
+		OpponentAgent: sess.opponentAgent,
+		Status:        sess.game.Status.String(),
+		Winner:        uint8(sess.game.Winner),
+		MoveCount:     sess.game.MoveCount,
+		CurrentPlayer: uint8(sess.game.CurrentPlayer),
+	}
+}
+
+func (s *ArenaServer) buildBattleDetailLocked(b *battleSession) BattleDetailDTO {
+	games := make([]GameSummaryDTO, 0)
+	for _, sess := range s.sessions {
+		sessBattle := sess.battleID
+		if sessBattle == "" {
+			sessBattle = "default"
+		}
+		if sessBattle == b.id {
+			games = append(games, s.buildGameSummaryLocked(sess))
+		}
+	}
+	sort.Slice(games, func(i, j int) bool {
+		return games[i].GameID < games[j].GameID
+	})
+
+	gameIDs := make([]string, len(games))
+	var completed, ongoing, clientWins, serverWins, draws int
+	for i, g := range games {
+		gameIDs[i] = g.GameID
+		switch g.WinnerSide {
+		case "CLIENT":
+			clientWins++
+			completed++
+		case "SERVER":
+			serverWins++
+			completed++
+		case "DRAW":
+			draws++
+			completed++
+		default:
+			ongoing++
+		}
+	}
+
+	var clientWinRate, serverWinRate, clientScoreRate float64
+	if completed > 0 {
+		clientWinRate = float64(clientWins) / float64(completed)
+		serverWinRate = float64(serverWins) / float64(completed)
+		clientScoreRate = (float64(clientWins) + 0.5*float64(draws)) / float64(completed)
+	}
+
+	participant := b.participant
+	if participant == "" {
+		participant = "Client Player"
+	}
+
+	winnerSide := "ONGOING"
+	winnerLabel := "ONGOING"
+	if completed > 0 {
+		if clientWins > serverWins {
+			winnerSide = "CLIENT"
+			winnerLabel = fmt.Sprintf("CLIENT (%s)", participant)
+		} else if serverWins > clientWins {
+			winnerSide = "SERVER"
+			if b.opponentAgent != "" {
+				winnerLabel = fmt.Sprintf("SERVER (%s)", b.opponentAgent)
+			} else {
+				winnerLabel = "SERVER"
+			}
+		} else {
+			winnerSide = "TIE"
+			winnerLabel = "TIE"
+		}
+	}
+
+	summary := BattleSummaryDTO{
+		BattleID:        b.id,
+		Name:            b.name,
+		Date:            b.date,
+		Participant:     participant,
+		ClientName:      participant,
+		OpponentAgent:   b.opponentAgent,
+		TotalGames:      len(games),
+		CompletedGames:  completed,
+		OngoingGames:    ongoing,
+		ClientWins:      clientWins,
+		ServerWins:      serverWins,
+		Draws:           draws,
+		ClientWinRate:   clientWinRate,
+		ServerWinRate:   serverWinRate,
+		ClientScoreRate: clientScoreRate,
+		WinnerSide:      winnerSide,
+		WinnerLabel:     winnerLabel,
+		GameIDs:         gameIDs,
+	}
+
+	return BattleDetailDTO{
+		BattleSummaryDTO: summary,
+		Games:            games,
+	}
+}
+
+func (s *ArenaServer) ensureBattleLocked(battleID, participant, oppAgent string) *battleSession {
+	if battleID == "" {
+		battleID = "default"
+	}
+	if b, exists := s.battles[battleID]; exists {
+		return b
+	}
+	part := strings.TrimSpace(participant)
+	if part == "" {
+		part = "Client Player"
+	}
+	seq := atomic.AddUint64(&s.battleSeq, 1)
+	b := &battleSession{
+		id:            battleID,
+		name:          battleID,
+		date:          time.Now().UTC().Format(time.RFC3339),
+		participant:   part,
+		opponentAgent: oppAgent,
+		seqOrder:      seq,
+	}
+	s.battles[battleID] = b
+	return b
+}
+
+func buildStateDTOWithBattle(sess *gameSession, b *battleSession) GameStateDTO {
 	g := sess.game
 	var board3D [4][4][4]uint8
 	for z := uint8(0); z < 4; z++ {
@@ -293,8 +612,8 @@ func buildStateDTO(sess *gameSession) GameStateDTO {
 
 	tensor := g.CanonicalTensor()
 	tensorSlice := make([]int, len(tensor))
-	for i, b := range tensor {
-		tensorSlice[i] = int(b)
+	for i, bVal := range tensor {
+		tensorSlice[i] = int(bVal)
 	}
 
 	matchName := sess.name
@@ -302,9 +621,19 @@ func buildStateDTO(sess *gameSession) GameStateDTO {
 		matchName = sess.id
 	}
 
+	battleID, battleName, participant, clientPlayer, serverPlayer, winnerSide, winnerLabel := resolveGameWinnerInfo(sess, b)
+
 	dto := GameStateDTO{
 		GameID:          sess.id,
+		BattleID:        battleID,
+		BattleName:      battleName,
 		Name:            matchName,
+		Participant:     participant,
+		ClientName:      participant,
+		ClientPlayer:    clientPlayer,
+		ServerPlayer:    serverPlayer,
+		WinnerSide:      winnerSide,
+		WinnerLabel:     winnerLabel,
 		WhiteName:       sess.whiteName,
 		BlackName:       sess.blackName,
 		OpponentAgent:   sess.opponentAgent,
@@ -341,6 +670,18 @@ func buildStateDTO(sess *gameSession) GameStateDTO {
 	return dto
 }
 
+func (s *ArenaServer) buildStateLocked(sess *gameSession) GameStateDTO {
+	b := s.battles[sess.battleID]
+	if b == nil {
+		b = s.battles["default"]
+	}
+	return buildStateDTOWithBattle(sess, b)
+}
+
+func buildStateDTO(sess *gameSession) GameStateDTO {
+	return buildStateDTOWithBattle(sess, nil)
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -366,6 +707,8 @@ func (s *ArenaServer) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/models", s.handleModels)
 	mux.HandleFunc("/api/v1/winlines", s.handleWinLines)
+	mux.HandleFunc("/api/v1/battles", s.handleBattlesRoot)
+	mux.HandleFunc("/api/v1/battles/", s.handleBattleByID)
 	mux.HandleFunc("/api/v1/games", s.handleGamesRoot)
 	mux.HandleFunc("/api/v1/games/", s.handleGameByID)
 	mux.HandleFunc("/api/v1/bots/", s.handleBotWebhook)
@@ -460,27 +803,377 @@ func (s *ArenaServer) handleWinLines(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"lines": lines})
 }
 
-func (s *ArenaServer) handleGamesRoot(w http.ResponseWriter, r *http.Request) {
+func (s *ArenaServer) handleBattlesRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
+		battleList := make([]*battleSession, 0, len(s.battles))
+		for _, b := range s.battles {
+			battleList = append(battleList, b)
+		}
+		sort.Slice(battleList, func(i, j int) bool {
+			if battleList[i].seqOrder != battleList[j].seqOrder {
+				return battleList[i].seqOrder < battleList[j].seqOrder
+			}
+			return battleList[i].id < battleList[j].id
+		})
+		summaries := make([]BattleSummaryDTO, len(battleList))
+		for i, b := range battleList {
+			summaries[i] = s.buildBattleDetailLocked(b).BattleSummaryDTO
+		}
+		s.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]interface{}{"battles": summaries})
+
+	case http.MethodPost:
+		var req CreateBattleRequest
+		if r.Body != nil {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bytes.TrimSpace(bodyBytes)) > 0 {
+				if err := json.Unmarshal(bodyBytes, &req); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+			}
+		}
+		oppAgentName := strings.TrimSpace(req.OpponentAgent)
+		if oppAgentName != "" {
+			ag, err := agents.NewAgentByName(oppAgentName, 1)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			oppAgentName = ag.Name()
+		}
+
+		participant := strings.TrimSpace(req.Participant)
+		if participant == "" {
+			participant = strings.TrimSpace(req.ClientName)
+		}
+		if participant == "" {
+			participant = strings.TrimSpace(req.PlayerName)
+		}
+		if participant == "" {
+			participant = "Client Player"
+		}
+
+		battleID := strings.TrimSpace(req.BattleID)
+		seq := atomic.AddUint64(&s.battleSeq, 1)
+		if battleID == "" {
+			battleID = fmt.Sprintf("battle-%d", seq)
+		}
+
+		battleName := strings.TrimSpace(req.Name)
+		if battleName == "" {
+			if participant != "Client Player" {
+				battleName = fmt.Sprintf("%s Battle", participant)
+			} else {
+				battleName = battleID
+			}
+		}
+
+		battleDate := strings.TrimSpace(req.Date)
+		if battleDate == "" {
+			battleDate = time.Now().UTC().Format(time.RFC3339)
+		}
+
+		s.mu.Lock()
+		b := &battleSession{
+			id:            battleID,
+			name:          battleName,
+			date:          battleDate,
+			participant:   participant,
+			opponentAgent: oppAgentName,
+			seqOrder:      seq,
+		}
+		s.battles[battleID] = b
+		dto := s.buildBattleDetailLocked(b)
+		s.mu.Unlock()
+
+		writeJSON(w, http.StatusCreated, dto)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *ArenaServer) handleBattleByID(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/battles/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusBadRequest, "missing battle_id")
+		return
+	}
+	battleID := parts[0]
+	subAction := ""
+	if len(parts) > 1 {
+		subAction = parts[1]
+	}
+
+	switch subAction {
+	case "":
+		switch r.Method {
+		case http.MethodGet:
+			s.mu.RLock()
+			b, exists := s.battles[battleID]
+			if !exists {
+				s.mu.RUnlock()
+				writeError(w, http.StatusNotFound, fmt.Sprintf("battle %q not found", battleID))
+				return
+			}
+			dto := s.buildBattleDetailLocked(b)
+			s.mu.RUnlock()
+			writeJSON(w, http.StatusOK, dto)
+
+		case http.MethodPatch:
+			s.handleUpdateBattle(w, r, battleID)
+
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+
+	case "games":
+		switch r.Method {
+		case http.MethodGet:
+			s.mu.RLock()
+			b, exists := s.battles[battleID]
+			if !exists {
+				s.mu.RUnlock()
+				writeError(w, http.StatusNotFound, fmt.Sprintf("battle %q not found", battleID))
+				return
+			}
+			dto := s.buildBattleDetailLocked(b)
+			s.mu.RUnlock()
+			writeJSON(w, http.StatusOK, dto)
+
+		case http.MethodPost:
+			s.mu.RLock()
+			_, exists := s.battles[battleID]
+			s.mu.RUnlock()
+			if !exists {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("battle %q not found", battleID))
+				return
+			}
+			var req CreateGameRequest
+			if r.Body != nil {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				if len(bytes.TrimSpace(bodyBytes)) > 0 {
+					if err := json.Unmarshal(bodyBytes, &req); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+				}
+			}
+			req.BattleID = battleID
+			s.createGameFromRequest(w, req)
+
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+
+	default:
+		writeError(w, http.StatusNotFound, fmt.Sprintf("unknown battle sub-route %q", subAction))
+	}
+}
+
+func (s *ArenaServer) handleUpdateBattle(w http.ResponseWriter, r *http.Request, battleID string) {
+	var req UpdateBattleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON update request")
+		return
+	}
+
+	var validatedOpp string
+	hasOppUpdate := false
+	if req.OpponentAgent != nil {
+		hasOppUpdate = true
+		trimmed := strings.TrimSpace(*req.OpponentAgent)
+		if trimmed != "" {
+			ag, err := agents.NewAgentByName(trimmed, 1)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			validatedOpp = ag.Name()
+		}
+	}
+
+	s.mu.Lock()
+	b, exists := s.battles[battleID]
+	if !exists {
+		s.mu.Unlock()
+		writeError(w, http.StatusNotFound, fmt.Sprintf("battle %q not found", battleID))
+		return
+	}
+	if req.Name != nil {
+		n := strings.TrimSpace(*req.Name)
+		if n != "" {
+			b.name = n
+		}
+	}
+	if req.Date != nil {
+		d := strings.TrimSpace(*req.Date)
+		if d != "" {
+			b.date = d
+		}
+	}
+	newParticipant := ""
+	if req.Participant != nil {
+		newParticipant = strings.TrimSpace(*req.Participant)
+	} else if req.ClientName != nil {
+		newParticipant = strings.TrimSpace(*req.ClientName)
+	}
+	if newParticipant != "" {
+		b.participant = newParticipant
+		for _, sess := range s.sessions {
+			if sess.battleID == battleID {
+				sess.participant = newParticipant
+			}
+		}
+	}
+	if hasOppUpdate {
+		b.opponentAgent = validatedOpp
+	}
+	dto := s.buildBattleDetailLocked(b)
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func (s *ArenaServer) createGameFromRequest(w http.ResponseWriter, req CreateGameRequest) {
+	battleID := strings.TrimSpace(req.BattleID)
+	if battleID == "" {
+		battleID = "default"
+	}
+
+	participant := strings.TrimSpace(req.Participant)
+	if participant == "" {
+		participant = strings.TrimSpace(req.ClientName)
+	}
+
+	s.mu.RLock()
+	existingBattle := s.battles[battleID]
+	var battleParticipant, battleOpp string
+	if existingBattle != nil {
+		battleParticipant = existingBattle.participant
+		battleOpp = existingBattle.opponentAgent
+	}
+	s.mu.RUnlock()
+
+	if participant == "" {
+		if battleParticipant != "" {
+			participant = battleParticipant
+		} else {
+			participant = "Client Player"
+		}
+	}
+
+	oppAgentName := strings.TrimSpace(req.OpponentAgent)
+	if oppAgentName == "" && battleOpp != "" {
+		oppAgentName = battleOpp
+	}
+
+	var oppAgent agents.Agent
+	if oppAgentName != "" {
+		var err error
+		oppAgent, err = agents.NewAgentByName(oppAgentName, 1)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		oppAgentName = oppAgent.Name()
+	}
+
+	humanSide := req.HumanPlayer
+	if humanSide == 0 && (req.ClientPlayer == 1 || req.ClientPlayer == 2) {
+		humanSide = req.ClientPlayer
+	}
+
+	gameID := strings.TrimSpace(req.GameID)
+	if gameID == "" {
+		seq := atomic.AddUint64(&s.seqCounter, 1)
+		gameID = fmt.Sprintf("game-%d", seq)
+	}
+	matchName := strings.TrimSpace(req.Name)
+	if matchName == "" {
+		matchName = gameID
+	}
+
+	hasCustomParticipant := participant != "" && participant != "Client Player"
+	whiteName := strings.TrimSpace(req.WhiteName)
+	if whiteName == "" {
+		if oppAgent != nil && humanSide == uint8(engine.PlayerBlack) {
+			whiteName = fmt.Sprintf("AI %s (White)", oppAgentName)
+		} else if hasCustomParticipant {
+			whiteName = fmt.Sprintf("%s (White)", participant)
+		} else {
+			whiteName = "Player 1 (White)"
+		}
+	}
+	blackName := strings.TrimSpace(req.BlackName)
+	if blackName == "" {
+		if oppAgent != nil && humanSide != uint8(engine.PlayerBlack) {
+			blackName = fmt.Sprintf("AI %s (Black)", oppAgentName)
+		} else if hasCustomParticipant && humanSide == uint8(engine.PlayerBlack) {
+			blackName = fmt.Sprintf("%s (Black)", participant)
+		} else {
+			blackName = "Player 2 (Black)"
+		}
+	}
+	serverStartsWhite := isServerWhitePlayer(whiteName, oppAgentName, humanSide)
+	matchName = formatMatchName(matchName, serverStartsWhite)
+
+	clientPlayer := uint8(1)
+	if req.ClientPlayer == 1 || req.ClientPlayer == 2 {
+		clientPlayer = req.ClientPlayer
+	} else if humanSide == 1 || humanSide == 2 {
+		clientPlayer = humanSide
+	} else if serverStartsWhite {
+		clientPlayer = 2
+	}
+
+	g := engine.NewGame()
+	// If external player chose Black (2) and an opponent model is configured, let the AI make White's opening move
+	if oppAgent != nil && humanSide == uint8(engine.PlayerBlack) {
+		if act, err := oppAgent.SelectAction(g); err == nil {
+			_, _ = g.ApplyMove(act)
+		}
+	}
+
+	s.mu.Lock()
+	b := s.ensureBattleLocked(battleID, participant, oppAgentName)
+	sess := &gameSession{
+		id:            gameID,
+		battleID:      b.id,
+		name:          matchName,
+		participant:   participant,
+		clientPlayer:  clientPlayer,
+		whiteName:     whiteName,
+		blackName:     blackName,
+		opponentAgent: oppAgentName,
+		game:          g,
+	}
+	s.sessions[gameID] = sess
+	dto := s.buildStateLocked(sess)
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusCreated, dto)
+}
+
+func (s *ArenaServer) handleGamesRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		battleFilter := strings.TrimSpace(r.URL.Query().Get("battle_id"))
+		s.mu.RLock()
 		summaries := make([]GameSummaryDTO, 0, len(s.sessions))
 		for _, sess := range s.sessions {
-			matchName := sess.name
-			if matchName == "" {
-				matchName = sess.id
+			sessBattle := sess.battleID
+			if sessBattle == "" {
+				sessBattle = "default"
 			}
-			summaries = append(summaries, GameSummaryDTO{
-				GameID:        sess.id,
-				Name:          matchName,
-				WhiteName:     sess.whiteName,
-				BlackName:     sess.blackName,
-				OpponentAgent: sess.opponentAgent,
-				Status:        sess.game.Status.String(),
-				Winner:        uint8(sess.game.Winner),
-				MoveCount:     sess.game.MoveCount,
-				CurrentPlayer: uint8(sess.game.CurrentPlayer),
-			})
+			if battleFilter != "" && sessBattle != battleFilter {
+				continue
+			}
+			summaries = append(summaries, s.buildGameSummaryLocked(sess))
 		}
 		s.mu.RUnlock()
 		sort.Slice(summaries, func(i, j int) bool {
@@ -499,68 +1192,7 @@ func (s *ArenaServer) handleGamesRoot(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		oppAgentName := strings.TrimSpace(req.OpponentAgent)
-		var oppAgent agents.Agent
-		if oppAgentName != "" {
-			var err error
-			oppAgent, err = agents.NewAgentByName(oppAgentName, 1)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			oppAgentName = oppAgent.Name()
-		}
-
-		gameID := strings.TrimSpace(req.GameID)
-		if gameID == "" {
-			seq := atomic.AddUint64(&s.seqCounter, 1)
-			gameID = fmt.Sprintf("game-%d", seq)
-		}
-		matchName := strings.TrimSpace(req.Name)
-		if matchName == "" {
-			matchName = gameID
-		}
-		whiteName := strings.TrimSpace(req.WhiteName)
-		if whiteName == "" {
-			if oppAgent != nil && req.HumanPlayer == uint8(engine.PlayerBlack) {
-				whiteName = fmt.Sprintf("AI %s (White)", oppAgentName)
-			} else {
-				whiteName = "Player 1 (White)"
-			}
-		}
-		blackName := strings.TrimSpace(req.BlackName)
-		if blackName == "" {
-			if oppAgent != nil && req.HumanPlayer != uint8(engine.PlayerBlack) {
-				blackName = fmt.Sprintf("AI %s (Black)", oppAgentName)
-			} else {
-				blackName = "Player 2 (Black)"
-			}
-		}
-		serverStartsWhite := isServerWhitePlayer(whiteName, oppAgentName, req.HumanPlayer)
-		matchName = formatMatchName(matchName, serverStartsWhite)
-
-		g := engine.NewGame()
-		// If external player chose Black (2) and an opponent model is configured, let the AI make White's opening move
-		if oppAgent != nil && req.HumanPlayer == uint8(engine.PlayerBlack) {
-			if act, err := oppAgent.SelectAction(g); err == nil {
-				_, _ = g.ApplyMove(act)
-			}
-		}
-
-		s.mu.Lock()
-		sess := &gameSession{
-			id:            gameID,
-			name:          matchName,
-			whiteName:     whiteName,
-			blackName:     blackName,
-			opponentAgent: oppAgentName,
-			game:          g,
-		}
-		s.sessions[gameID] = sess
-		dto := buildStateDTO(sess)
-		s.mu.Unlock()
-
-		writeJSON(w, http.StatusCreated, dto)
+		s.createGameFromRequest(w, req)
 
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -591,7 +1223,7 @@ func (s *ArenaServer) handleGameByID(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, fmt.Sprintf("game %q not found", gameID))
 				return
 			}
-			dto := buildStateDTO(sess)
+			dto := s.buildStateLocked(sess)
 			s.mu.RUnlock()
 			writeJSON(w, http.StatusOK, dto)
 
@@ -611,17 +1243,20 @@ func (s *ArenaServer) handleGameByID(w http.ResponseWriter, r *http.Request) {
 		sess, exists := s.sessions[gameID]
 		if !exists {
 			sess = &gameSession{
-				id:        gameID,
-				name:      formatMatchName(gameID, false),
-				whiteName: "Player 1 (White)",
-				blackName: "Player 2 (Black)",
-				game:      engine.NewGame(),
+				id:           gameID,
+				battleID:     "default",
+				name:         formatMatchName(gameID, false),
+				participant:  "Client Player",
+				clientPlayer: 1,
+				whiteName:    "Player 1 (White)",
+				blackName:    "Player 2 (Black)",
+				game:         engine.NewGame(),
 			}
 			s.sessions[gameID] = sess
 		} else {
 			sess.game.Reset()
 		}
-		dto := buildStateDTO(sess)
+		dto := s.buildStateLocked(sess)
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, dto)
 
@@ -680,6 +1315,27 @@ func (s *ArenaServer) handleUpdateGame(w http.ResponseWriter, r *http.Request, g
 		writeError(w, http.StatusNotFound, fmt.Sprintf("game %q not found", gameID))
 		return
 	}
+	if req.BattleID != nil {
+		bid := strings.TrimSpace(*req.BattleID)
+		if bid != "" {
+			b := s.ensureBattleLocked(bid, sess.participant, sess.opponentAgent)
+			sess.battleID = b.id
+		}
+	}
+	if req.Participant != nil {
+		p := strings.TrimSpace(*req.Participant)
+		if p != "" {
+			sess.participant = p
+		}
+	} else if req.ClientName != nil {
+		p := strings.TrimSpace(*req.ClientName)
+		if p != "" {
+			sess.participant = p
+		}
+	}
+	if req.ClientPlayer != nil && (*req.ClientPlayer == 1 || *req.ClientPlayer == 2) {
+		sess.clientPlayer = *req.ClientPlayer
+	}
 	if req.WhiteName != nil {
 		wn := strings.TrimSpace(*req.WhiteName)
 		if wn != "" {
@@ -708,8 +1364,15 @@ func (s *ArenaServer) handleUpdateGame(w http.ResponseWriter, r *http.Request, g
 	} else if req.WhiteName != nil {
 		serverStartsWhite := isServerWhitePlayer(sess.whiteName, sess.opponentAgent, 0)
 		sess.name = formatMatchName(sess.name, serverStartsWhite)
+		if req.ClientPlayer == nil {
+			if serverStartsWhite {
+				sess.clientPlayer = 2
+			} else {
+				sess.clientPlayer = 1
+			}
+		}
 	}
-	dto := buildStateDTO(sess)
+	dto := s.buildStateLocked(sess)
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, dto)
@@ -775,7 +1438,7 @@ func (s *ArenaServer) handleAIMove(w http.ResponseWriter, r *http.Request, gameI
 		reward = 1.0
 	}
 	resp := MoveResponseDTO{
-		State: buildStateDTO(sess),
+		State: s.buildStateLocked(sess),
 		LastMove: CoordDTO{
 			Action:     rec.Action,
 			X:          rec.X,
@@ -966,7 +1629,7 @@ func (s *ArenaServer) handleMove(w http.ResponseWriter, r *http.Request, gameID 
 	}
 
 	resp := MoveResponseDTO{
-		State:    buildStateDTO(sess),
+		State:    s.buildStateLocked(sess),
 		LastMove: lastMoveDTO,
 		AIMove:   aiMoveDTO,
 		Reward:   reward,
@@ -1007,11 +1670,14 @@ func (s *ArenaServer) handlePreset(w http.ResponseWriter, r *http.Request, gameI
 	sess, exists := s.sessions[gameID]
 	if !exists {
 		sess = &gameSession{
-			id:        gameID,
-			name:      formatMatchName(gameID, false),
-			whiteName: "Player 1 (White)",
-			blackName: "Player 2 (Black)",
-			game:      engine.NewGame(),
+			id:           gameID,
+			battleID:     "default",
+			name:         formatMatchName(gameID, false),
+			participant:  "Client Player",
+			clientPlayer: 1,
+			whiteName:    "Player 1 (White)",
+			blackName:    "Player 2 (Black)",
+			game:         engine.NewGame(),
 		}
 		s.sessions[gameID] = sess
 	} else {
@@ -1020,7 +1686,7 @@ func (s *ArenaServer) handlePreset(w http.ResponseWriter, r *http.Request, gameI
 	for _, a := range moves {
 		_, _ = sess.game.ApplyMove(a)
 	}
-	dto := buildStateDTO(sess)
+	dto := s.buildStateLocked(sess)
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, dto)
@@ -1089,15 +1755,43 @@ func (s *ArenaServer) handleRunMatch(w http.ResponseWriter, r *http.Request) {
 	serverStartsWhite := (whiteAgentName != "" && whiteURL == "") || isServerWhitePlayer(whiteName, whiteAgentName, 0)
 	matchName = formatMatchName(matchName, serverStartsWhite)
 
-	sess := &gameSession{
-		id:        gameID,
-		name:      matchName,
-		whiteName: whiteName,
-		blackName: blackName,
-		game:      engine.NewGame(),
+	battleID := strings.TrimSpace(req.BattleID)
+	if battleID == "" {
+		battleID = "default"
+	}
+	participant := strings.TrimSpace(req.Participant)
+	if participant == "" {
+		participant = strings.TrimSpace(req.ClientName)
+	}
+
+	clientPlayer := uint8(1)
+	if req.ClientPlayer == 1 || req.ClientPlayer == 2 {
+		clientPlayer = req.ClientPlayer
+	} else if serverStartsWhite {
+		clientPlayer = 2
+	}
+
+	oppAgent := blackAgentName
+	if serverStartsWhite && whiteAgentName != "" {
+		oppAgent = whiteAgentName
 	}
 
 	s.mu.Lock()
+	b := s.ensureBattleLocked(battleID, participant, oppAgent)
+	if participant == "" {
+		participant = b.participant
+	}
+	sess := &gameSession{
+		id:            gameID,
+		battleID:      b.id,
+		name:          matchName,
+		participant:   participant,
+		clientPlayer:  clientPlayer,
+		whiteName:     whiteName,
+		blackName:     blackName,
+		opponentAgent: oppAgent,
+		game:          engine.NewGame(),
+	}
 	s.sessions[gameID] = sess
 	s.mu.Unlock()
 
@@ -1108,7 +1802,7 @@ func (s *ArenaServer) handleRunMatch(w http.ResponseWriter, r *http.Request) {
 
 	for sess.game.Status == engine.StatusOngoing {
 		s.mu.RLock()
-		statePayload := buildStateDTO(sess)
+		statePayload := s.buildStateLocked(sess)
 		snapshot := sess.game.Clone()
 		activePlayer := sess.game.CurrentPlayer
 		s.mu.RUnlock()
@@ -1174,7 +1868,7 @@ func (s *ArenaServer) handleRunMatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	finalDTO := buildStateDTO(sess)
+	finalDTO := s.buildStateLocked(sess)
 	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, finalDTO)
 }

@@ -352,8 +352,8 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 		var modelsPayload struct {
 			Models []ModelInfoDTO `json:"models"`
 		}
-		if c := getJSON(t, client, baseURL+"/api/v1/models", &modelsPayload); c != http.StatusOK || len(modelsPayload.Models) != 6 {
-			t.Fatalf("expected 6 built-in models from /api/v1/models, got code=%d len=%d", c, len(modelsPayload.Models))
+		if c := getJSON(t, client, baseURL+"/api/v1/models", &modelsPayload); c != http.StatusOK || len(modelsPayload.Models) < 6 {
+			t.Fatalf("expected >= 6 built-in models from /api/v1/models, got code=%d len=%d", c, len(modelsPayload.Models))
 		}
 
 		// 2. Create a named match where external player is Black (human_player=2) vs ttt3dnet
@@ -370,6 +370,9 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 		}
 		if blackStart.Name != "SW - Grand Finals Game 1 — External Algo vs TTT3DNet" || blackStart.MoveCount != 1 || blackStart.CurrentPlayer != 2 {
 			t.Fatalf("expected AI to make opening White move on human_player=2 with SW prefix, got %+v", blackStart)
+		}
+		if blackStart.ClientPlayer != 2 || blackStart.ServerPlayer != 1 {
+			t.Fatalf("expected client_player=2 and server_player=1, got client=%d server=%d", blackStart.ClientPlayer, blackStart.ServerPlayer)
 		}
 
 		// Verify CW prefix when client starts first as White (human_player=1)
@@ -398,6 +401,131 @@ func TestHTTPSIntegration_AllGameRules(t *testing.T) {
 		}
 		if moveResp.AIMove == nil || moveResp.State.MoveCount != 3 || moveResp.State.CurrentPlayer != 2 {
 			t.Fatalf("expected automatic AI reply (move_count=3, current_player=2), got %+v", moveResp)
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// Phase 6: Battles Organization, Aggregate Statistics & Client vs Server Winner Tracking
+	// -------------------------------------------------------------------------
+	t.Run("Phase_6_Battles_And_Statistics_Over_HTTPS", func(t *testing.T) {
+		var battle BattleDetailDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/battles", CreateBattleRequest{
+			BattleID:      "https-battle-1",
+			Name:          "AlphaClient Qualifying Battle",
+			Date:          "2026-11-12",
+			Participant:   "AlphaClient",
+			OpponentAgent: "random",
+		}, &battle); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created on POST /api/v1/battles, got %d", c)
+		}
+		if battle.BattleID != "https-battle-1" || battle.Participant != "AlphaClient" || battle.ClientName != "AlphaClient" || battle.WinnerSide != "ONGOING" {
+			t.Fatalf("unexpected initial battle detail: %+v", battle)
+		}
+
+		// Game 1: Client plays White (client_player=1) and wins
+		var g1 GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/battles/https-battle-1/games", CreateGameRequest{
+			GameID:       "https-b1-g1",
+			Name:         "Battle Game 1",
+			ClientPlayer: 1,
+		}, &g1); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created on POST /api/v1/battles/https-battle-1/games, got %d", c)
+		}
+		if g1.BattleID != "https-battle-1" || g1.Participant != "AlphaClient" || g1.ClientPlayer != 1 || g1.ServerPlayer != 2 {
+			t.Fatalf("unexpected g1 battle metadata: %+v", g1)
+		}
+		if c := postJSON(t, client, baseURL+"/api/v1/games/https-b1-g1/preset", PresetRequest{
+			Type: "win", LineIndex: 0, Winner: 1,
+		}, &g1); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on g1 preset, got %d", c)
+		}
+		if g1.WinnerSide != "CLIENT" || g1.WinnerLabel != "CLIENT (AlphaClient)" {
+			t.Fatalf("expected g1 WinnerSide=CLIENT, got side=%q label=%q", g1.WinnerSide, g1.WinnerLabel)
+		}
+
+		// Game 2: Client plays Black (client_player=2, server plays White first) and Server (White=1) wins
+		var g2 GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/battles/https-battle-1/games", CreateGameRequest{
+			GameID:       "https-b1-g2",
+			Name:         "Battle Game 2",
+			ClientPlayer: 2,
+		}, &g2); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created on g2, got %d", c)
+		}
+		if c := postJSON(t, client, baseURL+"/api/v1/games/https-b1-g2/preset", PresetRequest{
+			Type: "win", LineIndex: 5, Winner: 1,
+		}, &g2); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on g2 preset, got %d", c)
+		}
+		if g2.WinnerSide != "SERVER" || g2.WinnerLabel != "SERVER (random)" {
+			t.Fatalf("expected g2 WinnerSide=SERVER, got side=%q label=%q", g2.WinnerSide, g2.WinnerLabel)
+		}
+
+		// With 1 Client win and 1 Server win, battle should report TIE
+		if c := getJSON(t, client, baseURL+"/api/v1/battles/https-battle-1", &battle); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on GET battle, got %d", c)
+		}
+		if battle.ClientWins != 1 || battle.ServerWins != 1 || battle.WinnerSide != "TIE" {
+			t.Fatalf("expected TIE at 1-1, got %+v", battle)
+		}
+
+		// Game 3: Client plays Black (client_player=2) and wins (Black=2)
+		var g3 GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/games", CreateGameRequest{
+			GameID:       "https-b1-g3",
+			BattleID:     "https-battle-1",
+			Name:         "Battle Game 3",
+			ClientPlayer: 2,
+		}, &g3); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created on g3, got %d", c)
+		}
+		if c := postJSON(t, client, baseURL+"/api/v1/games/https-b1-g3/preset", PresetRequest{
+			Type: "win", LineIndex: 10, Winner: 2,
+		}, &g3); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on g3 preset, got %d", c)
+		}
+		if g3.WinnerSide != "CLIENT" {
+			t.Fatalf("expected g3 WinnerSide=CLIENT when client_player=2 and Black wins, got %s", g3.WinnerSide)
+		}
+
+		// Game 4: Draw game in the battle
+		var g4 GameStateDTO
+		if c := postJSON(t, client, baseURL+"/api/v1/battles/https-battle-1/games", CreateGameRequest{
+			GameID:       "https-b1-g4",
+			Name:         "Battle Game 4",
+			ClientPlayer: 1,
+		}, &g4); c != http.StatusCreated {
+			t.Fatalf("expected 201 Created on g4, got %d", c)
+		}
+		if c := postJSON(t, client, baseURL+"/api/v1/games/https-b1-g4/preset", PresetRequest{
+			Type: "draw",
+		}, &g4); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on g4 draw preset, got %d", c)
+		}
+		if g4.WinnerSide != "DRAW" {
+			t.Fatalf("expected g4 WinnerSide=DRAW, got %s", g4.WinnerSide)
+		}
+
+		// Verify full battle stats: 4 games, 2 client wins, 1 server win, 1 draw -> CLIENT leads
+		if c := getJSON(t, client, baseURL+"/api/v1/battles/https-battle-1", &battle); c != http.StatusOK {
+			t.Fatalf("expected 200 OK on GET battle, got %d", c)
+		}
+		if battle.TotalGames != 4 || battle.CompletedGames != 4 || battle.OngoingGames != 0 ||
+			battle.ClientWins != 2 || battle.ServerWins != 1 || battle.Draws != 1 ||
+			battle.WinnerSide != "CLIENT" || len(battle.Games) != 4 {
+			t.Fatalf("unexpected battle aggregate statistics: %+v", battle)
+		}
+
+		// Verify GET /api/v1/battles/{id}/games and GET /api/v1/games?battle_id={id}
+		var bGames struct {
+			BattleID string           `json:"battle_id"`
+			Games    []GameSummaryDTO `json:"games"`
+		}
+		if c := getJSON(t, client, baseURL+"/api/v1/battles/https-battle-1/games", &bGames); c != http.StatusOK || len(bGames.Games) != 4 {
+			t.Fatalf("expected 4 games from /api/v1/battles/https-battle-1/games, got code=%d len=%d", c, len(bGames.Games))
+		}
+		if c := getJSON(t, client, baseURL+"/api/v1/games?battle_id=https-battle-1", &bGames); c != http.StatusOK || len(bGames.Games) != 4 {
+			t.Fatalf("expected 4 games from /api/v1/games?battle_id=https-battle-1, got code=%d len=%d", c, len(bGames.Games))
 		}
 	})
 }
