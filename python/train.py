@@ -30,10 +30,15 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
     parser.add_argument("--steps-per-iter", type=int, default=100, help="Gradient steps per iteration")
     parser.add_argument("--channels", type=int, default=32, help="3D ResNet trunk channels")
-    parser.add_argument("--blocks", type=int, default=2, help="Number of 3D ResNet blocks")
+    parser.add_argument("--blocks", type=int, default=3, help="Number of 3D ResNet blocks")
     parser.add_argument("--lr", type=float, default=1.5e-3, help="Learning rate")
-    parser.add_argument("--blunder-weight", type=float, default=4.0, help="1-ply threat blunder suppression weight")
+    parser.add_argument("--blunder-weight", type=float, default=4.5, help="1-ply & multi-ply threat blunder suppression weight")
     parser.add_argument("--checkpoint", default="checkpoints/ttt3d_latest.pt", help="Output checkpoint path")
+    parser.add_argument(
+        "--named-checkpoint",
+        default="checkpoints/ttt3d-deep-gray1.pt",
+        help="Named output checkpoint path for ttt3d-deep-gray1",
+    )
     parser.add_argument(
         "--export-go-bin",
         default="internal/agents/weights/ttt3d_latest.bin",
@@ -97,8 +102,8 @@ def main() -> None:
             eval_pure_heur = evaluate_against_baseline(
                 client, model, opponent="heuristic", num_games=10, use_tactical_lookahead=False
             )
-            eval_hybrid_heur = evaluate_against_baseline(
-                client, model, opponent="heuristic", num_games=10, use_tactical_lookahead=True
+            eval_hybrid_deep = evaluate_against_baseline(
+                client, model, opponent="deep", num_games=4, simulations=15, use_tactical_lookahead=True
             )
             print(
                 f"[Iter {it:02d}/{args.iterations:02d}] "
@@ -107,11 +112,14 @@ def main() -> None:
                 f"(pi={train_stats['policy_loss']:.4f}, v={train_stats['value_loss']:.4f}) "
                 f"pure_vs_random={eval_pure_rnd['win_rate']*100:.1f}% "
                 f"pure_vs_heuristic={eval_pure_heur['win_rate']*100:.1f}% "
-                f"hybrid_vs_heuristic={eval_hybrid_heur['win_rate']*100:.1f}%"
+                f"hybrid_vs_deep15={eval_hybrid_deep['win_rate']*100:.1f}%"
             )
             model.save_checkpoint(ckpt_path)
+            if args.named_checkpoint:
+                model.save_checkpoint(Path(args.named_checkpoint))
             if args.export_go_bin:
                 model.export_fused_binary(Path(args.export_go_bin))
+                model.export_fused_binary(Path("internal/agents/weights/ttt3d_deep_gray1.bin"))
 
 
 if __name__ == "__main__":

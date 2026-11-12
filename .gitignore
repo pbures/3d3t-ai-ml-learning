@@ -17,4 +17,5 @@ bin/
 # Model checkpoints (keep latest canonical checkpoint tracked)
 checkpoints/*
 !checkpoints/ttt3d_latest.pt
+!checkpoints/ttt3d-deep-gray1.pt
 *.pth

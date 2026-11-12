@@ -230,6 +230,33 @@ func (s *EnvServer) SelectAction(_ context.Context, req *pb.SelectActionRequest)
 	if ab, ok := ag.(*agents.AlphaBetaAgent); ok && req.Simulations > 0 && req.Simulations <= 6 {
 		ab.MaxDepth = int(req.Simulations)
 	}
+	if ds, ok := ag.(*agents.DeepSearchAgent); ok {
+		if req.Simulations > 0 {
+			// When Simulations is provided via gRPC (e.g. during RL teacher sparring),
+			// use Simulations as the minimum depth (>= 15) with a fast teacher budget unless >= 500 (ms).
+			if req.Simulations >= 500 {
+				ds.TimeBudget = time.Duration(req.Simulations) * time.Millisecond
+				ds.EnforceFullTime = true
+			} else {
+				ds.MinDepth = int(req.Simulations)
+				if ds.MinDepth < agents.DefaultDeepMinDepth {
+					ds.MinDepth = agents.DefaultDeepMinDepth
+				}
+				ds.TimeBudget = 120 * time.Millisecond
+				ds.EnforceFullTime = false
+			}
+		}
+		act, policyArr, val, err := ds.SearchWithPolicy(snapshot)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "%v", err)
+		}
+		return &pb.SelectActionResponse{
+			Action: uint32(act),
+			Agent:  ds.Name(),
+			Policy: policyArr[:],
+			Value:  val,
+		}, nil
+	}
 	if nn, ok := ag.(*agents.TTT3DNetAgent); ok {
 		act, policyArr, val, err := nn.SelectActionWithPolicy(snapshot)
 		if err != nil {

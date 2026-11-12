@@ -394,9 +394,14 @@ def generate_self_play_episodes(
             current_player = int(state["current_player"])
 
             if use_go_mcts_teacher:
-                mcts_res = client.select_action(
-                    agent="mcts", game_id=game_id, simulations=mcts_simulations
-                )
+                if ep % 2 == 0:
+                    mcts_res = client.select_action(
+                        agent="deep", game_id=game_id, simulations=max(15, mcts_simulations if mcts_simulations <= 24 else 16)
+                    )
+                else:
+                    mcts_res = client.select_action(
+                        agent="mcts", game_id=game_id, simulations=mcts_simulations
+                    )
                 target_pi = mcts_res["policy"]
                 mcts_val = float(mcts_res["value"])
                 # Mix MCTS teacher moves with model's own on-policy moves (DAgger exploration)
@@ -628,59 +633,74 @@ def generate_adversarial_sparring(
     augment: bool = True,
     rng: Optional[np.random.Generator] = None,
 ) -> int:
-    """Runs DAgger sparring games of Pure `model` against `heuristic` and `alphabeta`."""
+    """Runs DAgger sparring games of Pure `model` focused on the 15+ ply `deep` search baseline, `alphabeta`, and `heuristic`."""
     generator = rng if rng is not None else np.random.default_rng()
     samples_added = 0
 
-    for opp_name in ("heuristic", "alphabeta"):
+    opponents = ("deep", "deep", "alphabeta", "heuristic") if num_games_per_opponent >= 3 else ("deep", "heuristic", "alphabeta")
+    for opp_idx, opp_name in enumerate(opponents):
         for g_idx in range(num_games_per_opponent):
-            game_id = f"spar_{opp_name}_{g_idx}"
+            game_id = f"spar_{opp_name}_{opp_idx}_{g_idx}"
             nn_player = PLAYER_WHITE if (g_idx % 2 == 0) else PLAYER_BLACK
             # First two games per opponent use greedy temp=0.0 to hit exact deterministic eval lines
             temp = 0.0 if g_idx < 2 else 0.25
             state = client.reset(game_id=game_id)
             done = False
-            traj: List[Tuple[np.ndarray, int, int, int, int]] = []
+            traj: List[Tuple[np.ndarray, int, int, int, int, np.ndarray, float]] = []
 
             while not done:
                 obs = state["obs"]
                 valid_mask = int(state["valid_moves_mask"])
                 cur_player = int(state["current_player"])
-                ab_res = client.select_action(agent="alphabeta", game_id=game_id)
-                ab_act = int(ab_res["action"])
+                teacher_agent = "deep" if (opp_name == "deep" or num_games_per_opponent >= 3) else "alphabeta"
+                deep_res = client.select_action(agent=teacher_agent, game_id=game_id, simulations=15)
+                deep_act = int(deep_res["action"])
+                deep_pi = np.asarray(deep_res["policy"], dtype=np.float32)
+                deep_val = float(deep_res["value"])
 
                 if cur_player == nn_player:
                     act, _, _ = model.select_action(
                         obs, valid_mask=valid_mask, temperature=temp, rng=generator
                     )
                 else:
-                    opp_res = client.select_action(agent=opp_name, game_id=game_id)
-                    act = int(opp_res["action"])
+                    if opp_name == "deep":
+                        act = deep_act
+                    else:
+                        opp_res = client.select_action(agent=opp_name, game_id=game_id)
+                        act = int(opp_res["action"])
 
-                traj.append((obs, cur_player, valid_mask, int(act), ab_act))
+                traj.append((obs, cur_player, valid_mask, int(act), deep_act, deep_pi, deep_val))
                 step_res = client.step(action=int(act), game_id=game_id)
                 state = step_res["state"]
                 done = step_res["done"]
 
             winner = int(state["winner"])
-            for obs, player_at_step, mask_at_step, act_taken, ab_act in traj:
+            for obs, player_at_step, mask_at_step, act_taken, deep_act, deep_pi, deep_val in traj:
                 my_bb, opp_bb = _canonical_tensor_to_bitboards(obs)
                 teacher_pi, teacher_val = _compute_tactical_teacher_policy(
                     my_bb, opp_bb, mask_at_step
                 )
-                extra_bm = _zero_prob_blunder_mask(teacher_pi, mask_at_step)
+                # Combine 15+ ply deep search policy distribution with 2-ply fork shield
+                blended_teacher = 0.70 * deep_pi + 0.30 * teacher_pi
+                bt_sum = float(blended_teacher.sum())
+                if bt_sum > 1e-8:
+                    blended_teacher /= bt_sum
+                else:
+                    blended_teacher = teacher_pi
+
+                extra_bm = _zero_prob_blunder_mask(teacher_pi, mask_at_step) | _zero_prob_blunder_mask(deep_pi, mask_at_step)
 
                 if player_at_step == nn_player:
-                    # Boost the depth-3 Alpha-Beta move if it is fork-safe
-                    if teacher_pi[ab_act] > 0:
-                        target_pi = 0.25 * teacher_pi
-                        target_pi[ab_act] += 0.75
+                    # Boost the 15+ ply deep search move if it is fork-safe
+                    if teacher_pi[deep_act] > 0:
+                        target_pi = 0.30 * blended_teacher
+                        target_pi[deep_act] += 0.70
                         target_pi /= target_pi.sum()
                     else:
-                        target_pi = teacher_pi
-                    # If the pure model lost this game and deviated from the safe teacher move,
+                        target_pi = blended_teacher
+                    # If the pure model lost this game and deviated from the 15+ ply teacher move,
                     # explicitly mark the losing move in extra_bm so margin loss suppresses it
-                    if winner != 0 and winner != nn_player and act_taken != ab_act and target_pi[ab_act] > 0.2:
+                    if winner != 0 and winner != nn_player and act_taken != deep_act and target_pi[deep_act] > 0.2:
                         target_pi[act_taken] = 0.0
                         s_tot = float(target_pi.sum())
                         if s_tot > 1e-8:
@@ -689,18 +709,19 @@ def generate_adversarial_sparring(
                 else:
                     # If the opponent won, also learn from the opponent's winning move if fork-safe
                     if winner == player_at_step and teacher_pi[act_taken] > 0:
-                        target_pi = 0.25 * teacher_pi
-                        target_pi[act_taken] += 0.75
+                        target_pi = 0.30 * blended_teacher
+                        target_pi[act_taken] += 0.70
                         target_pi /= target_pi.sum()
                     else:
-                        target_pi = teacher_pi
+                        target_pi = blended_teacher
 
+                combined_val = 0.65 * deep_val + 0.35 * teacher_val
                 if winner == 0:
-                    z = 0.5 * teacher_val
+                    z = 0.5 * combined_val
                 elif winner == player_at_step:
-                    z = 0.7 * 1.0 + 0.3 * teacher_val
+                    z = 0.65 * 1.0 + 0.35 * combined_val
                 else:
-                    z = 0.7 * (-1.0) + 0.3 * teacher_val
+                    z = 0.65 * (-1.0) + 0.35 * combined_val
 
                 samples_added += buffer.add_sample(
                     state=obs,
@@ -818,7 +839,8 @@ def generate_tactical_threat_curriculum(
 
             teacher_pi, teacher_val = _compute_tactical_teacher_policy(my_bb, opp_bb, valid_mask)
             win_mask, blunder_mask, forced_loss = compute_tactical_action_masks(obs, valid_mask)
-            if win_mask != 0 or blunder_mask != 0 or forced_loss or float(generator.random()) < 0.35:
+            extra_bm = _zero_prob_blunder_mask(teacher_pi, valid_mask)
+            if win_mask != 0 or blunder_mask != 0 or extra_bm != 0 or forced_loss or float(generator.random()) < 0.35:
                 samples_added += buffer.add_sample(
                     state=obs,
                     policy=teacher_pi,
@@ -826,6 +848,7 @@ def generate_tactical_threat_curriculum(
                     valid_mask=valid_mask,
                     augment=augment,
                     rectify_tactical=True,
+                    extra_blunder_mask=extra_bm,
                 )
 
             legal = [a for a in range(NUM_ACTIONS) if (valid_mask & (1 << a)) != 0]
