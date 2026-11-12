@@ -16,8 +16,14 @@ func TestUnitHandlerMethodsAndErrors(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "3T3D") {
+	bodyHTML := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(bodyHTML, "3T3D") {
 		t.Fatalf("expected 200 OK with HTML UI, got %d", rec.Code)
+	}
+	for _, uiID := range []string{"btn-collapse-sidebar", "btn-expand-sidebar", "preview-bar", "preview-prev", "preview-play", "preview-next"} {
+		if !strings.Contains(bodyHTML, uiID) {
+			t.Fatalf("expected HTML UI to contain %q", uiID)
+		}
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/", nil)

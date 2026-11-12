@@ -23,13 +23,14 @@
       background: var(--bg);
       color: var(--text);
       height: 100vh;
-      display: flex;
+      width: 100vw;
+      position: relative;
       overflow: hidden;
     }
     #viewport-container {
-      flex: 1;
-      position: relative;
+      width: 100%;
       height: 100vh;
+      position: relative;
     }
     #hud-overlay {
       position: absolute;
@@ -68,15 +69,83 @@
       margin-top: 4px;
     }
     #sidebar {
+      position: fixed;
+      top: 0;
+      right: 0;
       width: 430px;
-      background: var(--panel);
+      max-width: 92vw;
+      background: rgba(30, 41, 59, 0.92);
+      backdrop-filter: blur(12px);
       border-left: 1px solid var(--panel-border);
+      box-shadow: -8px 0 28px rgba(0, 0, 0, 0.45);
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow-y: auto;
       padding: 14px;
       gap: 12px;
+      z-index: 30;
+      transition: transform 0.25s ease, opacity 0.2s ease;
+    }
+    body.panel-collapsed #sidebar {
+      transform: translateX(100%);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .sidebar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .sidebar-header span {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #btn-expand-sidebar {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 25;
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid var(--panel-border);
+      backdrop-filter: blur(8px);
+      padding: 8px 14px;
+      display: none;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+    body.panel-collapsed #btn-expand-sidebar {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #preview-bar {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 25;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--panel-border);
+      border-radius: 999px;
+      padding: 8px 12px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+    body.panel-collapsed #preview-bar {
+      display: flex;
+    }
+    #preview-bar button {
+      border-radius: 999px;
+      padding: 7px 14px;
+      font-size: 0.84rem;
     }
     .card {
       background: rgba(15, 23, 42, 0.6);
@@ -289,7 +358,19 @@
     </div>
   </div>
 
+  <button id="btn-expand-sidebar" title="Show Control Panel">☰ Controls</button>
+
+  <div id="preview-bar" role="toolbar" aria-label="Game Preview Controls">
+    <button id="preview-prev" title="Step Backward 1 Move">◀ Back</button>
+    <button id="preview-play" class="primary" title="Play / Pause Auto-Replay">Play</button>
+    <button id="preview-next" title="Step Forward 1 Move">Next ▶</button>
+  </div>
+
   <div id="sidebar">
+    <div class="sidebar-header">
+      <span>Arena Controls</span>
+      <button id="btn-collapse-sidebar" title="Hide Control Panel">✕ Hide</button>
+    </div>
     <!-- Battle Organization & Statistics Card -->
     <div class="card">
       <h2>
@@ -573,6 +654,9 @@
     const moveListEl = document.getElementById('move-list');
     const columnPad = document.getElementById('column-pad');
     const btnPlay = document.getElementById('btn-play');
+    const previewPlayBtn = document.getElementById('preview-play');
+    const previewPrevBtn = document.getElementById('preview-prev');
+    const previewNextBtn = document.getElementById('preview-next');
 
     // Build 4x4 Column Pad
     for (let y = 0; y < 4; y++) {
@@ -617,6 +701,7 @@
         playTimer = null;
       }
       btnPlay.textContent = 'Play';
+      if (previewPlayBtn) previewPlayBtn.textContent = 'Play';
     }
 
     function setReplayPly(newPly) {
@@ -1035,7 +1120,7 @@
     };
     plySlider.oninput = (e) => { stopAutoPlay(); setReplayPly(parseInt(e.target.value, 10)); };
 
-    btnPlay.onclick = () => {
+    function toggleAutoPlay() {
       if (playTimer) {
         stopAutoPlay();
         return;
@@ -1046,6 +1131,7 @@
         setReplayPly(0);
       }
       btnPlay.textContent = 'Pause';
+      if (previewPlayBtn) previewPlayBtn.textContent = 'Pause';
       const intervalMs = parseInt(document.getElementById('speed-select').value, 10) || 450;
       playTimer = setInterval(() => {
         const maxPly = (currentGame.history || []).length;
@@ -1055,6 +1141,18 @@
           stopAutoPlay();
         }
       }, intervalMs);
+    }
+
+    btnPlay.onclick = toggleAutoPlay;
+    previewPlayBtn.onclick = toggleAutoPlay;
+    previewPrevBtn.onclick = () => { stopAutoPlay(); setReplayPly(replayPly - 1); };
+    previewNextBtn.onclick = () => { stopAutoPlay(); setReplayPly(replayPly + 1); };
+
+    document.getElementById('btn-collapse-sidebar').onclick = () => {
+      document.body.classList.add('panel-collapsed');
+    };
+    document.getElementById('btn-expand-sidebar').onclick = () => {
+      document.body.classList.remove('panel-collapsed');
     };
 
     // 3D Peg Click via Raycaster
