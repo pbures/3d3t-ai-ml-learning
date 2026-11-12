@@ -337,7 +337,7 @@ func (s *deepSearcher) checkTime() bool {
 	if !s.hasDeadline {
 		return false
 	}
-	if (s.nodes & 1023) == 0 {
+	if (s.nodes & 255) == 0 {
 		if time.Now().After(s.deadline) {
 			s.aborted = true
 			return true
@@ -504,12 +504,18 @@ func (s *deepSearcher) pvs(
 
 		var val int
 		if i == 0 {
-			val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, depth-1, -beta, -alpha, nextHash, 1-side, extensions)
+			pvDepth := depth - 1
+			if s.lmrScale >= 3 && ply >= 2 && depth >= 4 {
+				pvDepth = depth - 2
+			}
+			val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, pvDepth, -beta, -alpha, nextHash, 1-side, extensions)
 		} else {
 			// Late Move Reductions (LMR) for non-PV moves (i >= 1)
 			reduction := 0
 			if depth >= 3 && i >= 1 && s.lmrScale > 0 {
-				if s.lmrScale >= 2 {
+				if s.lmrScale >= 3 {
+					reduction = 2 + (depth / 2) + (i / 2)
+				} else if s.lmrScale == 2 {
 					reduction = 1 + (depth / 3) + (i / 3)
 				} else {
 					reduction = 1 + (depth / 5) + (i / 4)
@@ -523,14 +529,19 @@ func (s *deepSearcher) pvs(
 			val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, depth-1-reduction, -alpha-1, -alpha, nextHash, 1-side, extensions)
 
 			// Re-search at tighter depth if reduced search beat alpha
-			if val > alpha && reduction > 1 && !s.aborted {
+			if val > alpha && reduction > 1 && !s.aborted && s.lmrScale <= 2 {
 				midDepth := depth - 1 - (reduction / 2)
 				val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, midDepth, -alpha-1, -alpha, nextHash, 1-side, extensions)
 			}
 			// Re-search with full window if null-window search falls inside (alpha, beta)
 			if val > alpha && val < beta && !s.aborted {
 				remDepth := depth - 1
-				if s.lmrScale >= 2 && depth >= 8 && i >= 2 {
+				if s.lmrScale >= 3 && depth >= 5 {
+					remDepth = depth - 1 - (reduction / 2)
+					if remDepth < 1 {
+						remDepth = 1
+					}
+				} else if s.lmrScale == 2 && depth >= 8 && i >= 2 {
 					remDepth = depth - 2
 				}
 				val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, remDepth, -beta, -alpha, nextHash, 1-side, extensions)
@@ -852,8 +863,11 @@ func (a *DeepSearchAgent) runTimedDeepening(
 	// Phase 1: Iterative deepening from depth 1 up to maxDepth.
 	for depth := 1; depth <= maxDepth; depth++ {
 		if depth <= targetMinDepth {
-			searcher.hasDeadline = false
-			searcher.lmrScale = 2
+			searcher.hasDeadline = depth >= 8
+			searcher.lmrScale = 3
+			if depth >= 8 && time.Now().After(deadline) {
+				break
+			}
 		} else if depth <= 22 {
 			searcher.hasDeadline = true
 			searcher.lmrScale = 2
@@ -897,7 +911,12 @@ func (a *DeepSearchAgent) runTimedDeepening(
 				val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, depth-1, -beta, -alpha, nextHash, 1, 0)
 			} else {
 				rootRed := 0
-				if depth >= 5 && idx >= 2 && searcher.lmrScale >= 2 {
+				if depth >= 4 && idx >= 1 && searcher.lmrScale >= 3 {
+					rootRed = 1 + (depth / 3) + (idx / 3)
+					if depth-1-rootRed < 2 {
+						rootRed = depth - 3
+					}
+				} else if depth >= 5 && idx >= 2 && searcher.lmrScale == 2 {
 					rootRed = 1 + (depth / 4) + (idx / 4)
 					if depth-1-rootRed < 2 {
 						rootRed = depth - 3
@@ -905,7 +924,11 @@ func (a *DeepSearchAgent) runTimedDeepening(
 				}
 				val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, depth-1-rootRed, -alpha-1, -alpha, nextHash, 1, 0)
 				if val > alpha && !searcher.aborted {
-					val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, depth-1, -beta, -alpha, nextHash, 1, 0)
+					remRootDepth := depth - 1
+					if searcher.lmrScale >= 3 && depth >= 6 {
+						remRootDepth = depth - 1 - (rootRed / 2)
+					}
+					val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, remRootDepth, -beta, -alpha, nextHash, 1, 0)
 				}
 			}
 
