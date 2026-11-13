@@ -9,9 +9,23 @@ import (
 )
 
 const (
-	DefaultDeepTimeBudget = 1500 * time.Millisecond
-	DefaultDeepMinDepth   = 15
-	DefaultDeepMaxDepth   = 40
+	// DefaultDeepTimeBudget is the per-move thinking time of the "deep" baseline (kept below the
+	// arena's 3s per-move cap with margin for HTTP / scheduling overhead).
+	DefaultDeepTimeBudget = 2800 * time.Millisecond
+	// DefaultDeepMinDepth is the iterative-deepening depth that fast (non EnforceFullTime) searches
+	// try to reach before returning.
+	DefaultDeepMinDepth = 15
+	DefaultDeepMaxDepth = 64
+	// DefaultDeepSolverFromPly is the first ply (move count) at which the exact WDL endgame solver
+	// is run in addition to PVS.
+	DefaultDeepSolverFromPly = 20
+	// deepPVSShareWithSolver is the fraction of the time budget given to PVS when the solver runs;
+	// from deepLateSolverPly on, the solver usually decides the game, so it receives more time.
+	deepPVSShareWithSolver = 0.45
+	deepPVSShareLate       = 0.25
+	deepLateSolverPly      = 26
+	// deepSolverMargin is the safety margin kept free at the end of the budget.
+	deepSolverMargin = 15 * time.Millisecond
 
 	ttSize = 1 << 18 // 262,144 entries (~4 MB)
 	ttMask = ttSize - 1
@@ -65,37 +79,9 @@ type ttEntry struct {
 	bestMove uint8
 }
 
-// checkBitWinFast checks only the 4 or 7 winning lines passing through `bit`.
-func checkBitWinFast(bb uint64, bit uint8) bool {
-	cnt := cellWinLineCount[bit]
-	lines := &cellWinLines[bit]
-	for i := uint8(0); i < cnt; i++ {
-		m := lines[i]
-		if (bb & m) == m {
-			return true
-		}
-	}
-	return false
-}
-
 // surfaceBitmaskFast computes the 16-column 3D gravity landing mask in O(1) bit operations.
 func surfaceBitmaskFast(occ uint64) uint64 {
 	return (^occ) & ((occ << 16) | 0xFFFF)
-}
-
-// threatCellsBitboard computes a 64-bit mask of all empty cells where `myBB` has 3-in-a-row and `oppBB` has 0.
-func threatCellsBitboard(myBB, oppBB uint64) uint64 {
-	var threats uint64
-	for _, mask := range engine.WinMasks {
-		if (oppBB & mask) != 0 {
-			continue
-		}
-		myBits := myBB & mask
-		if bits.OnesCount64(myBits) == 3 {
-			threats |= (mask &^ myBits)
-		}
-	}
-	return threats
 }
 
 // threatCellsPairBitboard computes both players' 3-in-a-row empty threat bitmasks in a single pass.
@@ -313,295 +299,30 @@ func computeZobristHash(myBB, oppBB uint64) uint64 {
 	return h
 }
 
-type deepSearcher struct {
-	tt          []ttEntry
-	killers     [64][2]uint8
-	history     [2][16]int32
-	nodes       uint64
-	deadline    time.Time
-	hasDeadline bool
-	aborted     bool
-	lmrScale    int // Controls LMR aggressiveness (higher during initial 15-ply pass, tighter during verification)
-}
-
-func newDeepSearcher(deadline time.Time, hasDeadline bool) *deepSearcher {
-	return &deepSearcher{
-		tt:          make([]ttEntry, ttSize),
-		deadline:    deadline,
-		hasDeadline: hasDeadline,
-		lmrScale:    2,
-	}
-}
-
-func (s *deepSearcher) checkTime() bool {
-	if !s.hasDeadline {
-		return false
-	}
-	if (s.nodes & 255) == 0 {
-		if time.Now().After(s.deadline) {
-			s.aborted = true
-			return true
-		}
-	}
-	return s.aborted
-}
-
-// pvs executes Principal Variation Search with Zobrist TT, Check Extensions, Poison Pruning, and LMR.
-func (s *deepSearcher) pvs(
-	myBB, oppBB uint64,
-	moveCount uint8,
-	ply int,
-	depth int,
-	alpha, beta int,
-	hash uint64,
-	side int,
-	extensions int,
-) int {
-	s.nodes++
-	if s.checkTime() {
-		return 0
-	}
-
-	occ := myBB | oppBB
-	if occ == 0xFFFF_FFFF_FFFF_FFFF {
-		return 0 // Full board draw
-	}
-
-	surface := surfaceBitmaskFast(occ)
-
-	// 1. Check immediate 1-ply win and opponent threats in a single pass
-	myThreats, oppThreats := threatCellsPairBitboard(myBB, oppBB)
-	if (myThreats & surface) != 0 {
-		return ScoreWin - int(moveCount+1)
-	}
-
-	// 2. Check immediate 1-ply threats by opponent
-	oppImm := oppThreats & surface
-	oppImmCount := bits.OnesCount64(oppImm)
-	if oppImmCount >= 2 {
-		// Unstoppable double surface threat for opponent
-		return ScoreLoss + int(moveCount+2)
-	}
-
-	// Check opponent stacked vertical fork that is already unstoppable
-	if oppImmCount == 1 {
-		forcedBit := uint8(bits.TrailingZeros64(oppImm))
-		if forcedBit < 48 && (oppThreats&(uint64(1)<<(forcedBit+16))) != 0 {
-			// Blocking at forcedBit immediately unlocks forcedBit+16 for opponent to win!
-			return ScoreLoss + int(moveCount+2)
-		}
-		// Single forced block: apply Check Extension so forcing sequences do not exhaust depth!
-		nextDepth := depth - 1
-		nextExt := extensions
-		if extensions < 8 {
-			nextDepth = depth // Do not decrement depth on strictly forced 1-move replies!
-			nextExt = extensions + 1
-		}
-		newMy := myBB | oppImm
-		nextHash := hash ^ zobristPiece[side][forcedBit] ^ zobristTurn
-		return -s.pvs(oppBB, newMy, moveCount+1, ply+1, nextDepth, -beta, -alpha, nextHash, 1-side, nextExt)
-	}
-
-	// 3. Leaf evaluation when depth <= 0
-	if depth <= 0 {
-		return evaluateBitboardFast(myBB, oppBB, myThreats, oppThreats, moveCount)
-	}
-
-	// 4. Transposition Table lookup
-	origAlpha := alpha
-	ttIdx := hash & ttMask
-	tte := s.tt[ttIdx]
-	ttMove := uint8(255)
-	if tte.key == hash {
-		ttMove = tte.bestMove
-		if int(tte.depth) >= depth {
-			ttScore := int(tte.score)
-			switch tte.flag {
-			case ttFlagExact:
-				return ttScore
-			case ttFlagLower:
-				if ttScore > alpha {
-					alpha = ttScore
-				}
-			case ttFlagUpper:
-				if ttScore < beta {
-					beta = ttScore
-				}
-			}
-			if alpha >= beta {
-				return ttScore
-			}
-		}
-	}
-
-	// 5. Filter out 1-ply poison moves (playing at z where z+1 is an opponent 3-in-a-row threat)
-	poisonMask := surface & (oppThreats >> 16)
-	safeSurface := surface &^ poisonMask
-	if safeSurface == 0 {
-		// All legal columns unlock an immediate opponent win above (Zugzwang exhaustion)
-		return ScoreLoss + int(moveCount+2)
-	}
-
-	// 6. Generate and score candidate moves for move ordering
-	var moveBits [16]uint8
-	var moveCols [16]uint8
-	var moveScores [16]int32
-	numMoves := 0
-
-	k0 := s.killers[ply][0]
-	k1 := s.killers[ply][1]
-	// Cells that complete a new 3-in-a-row or stack for me
-	myStackTargets := ((myThreats << 16) | (myThreats >> 16)) &^ occ &^ oppThreats
-
-	for _, col := range baseColumnOrder {
-		colMask := uint64(0x0001_0001_0001_0001) << col
-		bitMask := safeSurface & colMask
-		if bitMask == 0 {
-			continue
-		}
-		bit := uint8(bits.TrailingZeros64(bitMask))
-		var mScore int32
-		if col == ttMove {
-			mScore = 1_000_000
-		} else {
-			if col == k0 {
-				mScore += 90_000
-			} else if col == k1 {
-				mScore += 80_000
-			}
-			mScore += s.history[side][col]
-			mScore += int32(CellLineCounts[bit]) * 64
-			if (bitMask & CenterZ0Z1Mask) != 0 {
-				mScore += 200
-			}
-			if (bitMask & myStackTargets) != 0 {
-				mScore += 25_000
-			}
-		}
-
-		// Insertion sort descending by mScore
-		pos := numMoves
-		for pos > 0 && moveScores[pos-1] < mScore {
-			moveBits[pos] = moveBits[pos-1]
-			moveCols[pos] = moveCols[pos-1]
-			moveScores[pos] = moveScores[pos-1]
-			pos--
-		}
-		moveBits[pos] = bit
-		moveCols[pos] = col
-		moveScores[pos] = mScore
-		numMoves++
-	}
-
-	bestScore := -1_000_000
-	bestCol := moveCols[0]
-
-	for i := 0; i < numMoves; i++ {
-		bit := moveBits[i]
-		col := moveCols[i]
-		newMy := myBB | (uint64(1) << bit)
-		nextHash := hash ^ zobristPiece[side][bit] ^ zobristTurn
-
-		var val int
-		if i == 0 {
-			pvDepth := depth - 1
-			if s.lmrScale >= 3 && ply >= 2 && depth >= 4 {
-				pvDepth = depth - 2
-			}
-			val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, pvDepth, -beta, -alpha, nextHash, 1-side, extensions)
-		} else {
-			// Late Move Reductions (LMR) for non-PV moves (i >= 1)
-			reduction := 0
-			if depth >= 3 && i >= 1 && s.lmrScale > 0 {
-				if s.lmrScale >= 3 {
-					reduction = 2 + (depth / 2) + (i / 2)
-				} else if s.lmrScale == 2 {
-					reduction = 1 + (depth / 3) + (i / 3)
-				} else {
-					reduction = 1 + (depth / 5) + (i / 4)
-				}
-				if depth-1-reduction < 1 {
-					reduction = depth - 2
-				}
-			}
-
-			// Null-window search (with LMR reduction)
-			val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, depth-1-reduction, -alpha-1, -alpha, nextHash, 1-side, extensions)
-
-			// Re-search at tighter depth if reduced search beat alpha
-			if val > alpha && reduction > 1 && !s.aborted && s.lmrScale <= 2 {
-				midDepth := depth - 1 - (reduction / 2)
-				val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, midDepth, -alpha-1, -alpha, nextHash, 1-side, extensions)
-			}
-			// Re-search with full window if null-window search falls inside (alpha, beta)
-			if val > alpha && val < beta && !s.aborted {
-				remDepth := depth - 1
-				if s.lmrScale >= 3 && depth >= 5 {
-					remDepth = depth - 1 - (reduction / 2)
-					if remDepth < 1 {
-						remDepth = 1
-					}
-				} else if s.lmrScale == 2 && depth >= 8 && i >= 2 {
-					remDepth = depth - 2
-				}
-				val = -s.pvs(oppBB, newMy, moveCount+1, ply+1, remDepth, -beta, -alpha, nextHash, 1-side, extensions)
-			}
-		}
-
-		if s.aborted {
-			return bestScore
-		}
-
-		if val > bestScore {
-			bestScore = val
-			bestCol = col
-		}
-		if bestScore > alpha {
-			alpha = bestScore
-		}
-		if alpha >= beta {
-			// Record killer & history heuristic on beta cutoff
-			if s.killers[ply][0] != col {
-				s.killers[ply][1] = s.killers[ply][0]
-				s.killers[ply][0] = col
-			}
-			bonus := int32(depth * depth)
-			if s.history[side][col]+bonus < 50_000 {
-				s.history[side][col] += bonus
-			}
-			break
-		}
-	}
-
-	// Store in Transposition Table
-	flag := uint8(ttFlagExact)
-	if bestScore <= origAlpha {
-		flag = ttFlagUpper
-	} else if bestScore >= beta {
-		flag = ttFlagLower
-	}
-	s.tt[ttIdx] = ttEntry{
-		key:      hash,
-		score:    int32(bestScore),
-		depth:    int8(depth),
-		flag:     flag,
-		bestMove: bestCol,
-	}
-
-	return bestScore
-}
-
-// DeepSearchAgent implements an adaptive iterative-deepening Principal Variation Search (PVS)
-// baseline agent with Zobrist transposition table, LMR, Killer/History heuristics, and Check Extensions.
-// By default, each move searches for ~1.5 seconds and reaches at least 15 plies of lookahead.
+// DeepSearchAgent is the classical search baseline ("deep"). Each move it runs:
+//  1. sound tactical shortcuts (immediate win, forced block, poison-column filtering),
+//  2. iterative-deepening PVS (pvsSearcher) with Zobrist TT, logarithmic LMR with full-depth
+//     re-search, killer/history ordering, check extensions and a zugzwang-parity aware evaluation,
+//  3. from DefaultDeepSolverFromPly onwards, an exact Win/Draw/Loss solver (wdlSolver) over the root
+//     moves that plays proven wins and vetoes proven losses.
+//
+// By default each move uses ~2.8 seconds. The agent is deterministic up to timing effects.
 type DeepSearchAgent struct {
-	TimeBudget       time.Duration
-	MinDepth         int
-	MaxDepth         int
-	EnforceFullTime  bool
+	TimeBudget      time.Duration
+	MinDepth        int
+	MaxDepth        int
+	EnforceFullTime bool
+	// SolverFromPly enables the exact endgame solver when the game's move count is >= this value.
+	// A negative value disables the solver.
+	SolverFromPly int
+
 	LastDepthReached int
 	LastNodesVisited uint64
-	LastElapsed      time.Duration
+	LastSolverNodes  uint64
+	// LastProvenValue is the proven game value (+1 win, 0 draw, -1 loss) of the chosen move from
+	// the mover's perspective, or wdlUnknown (2) if it was not proven.
+	LastProvenValue int
+	LastElapsed     time.Duration
 }
 
 // NewDeepSearchAgent creates a DeepSearchAgent with the specified per-move time budget and minimum depth.
@@ -617,6 +338,7 @@ func NewDeepSearchAgent(timeBudget time.Duration, minDepth int) *DeepSearchAgent
 		MinDepth:        minDepth,
 		MaxDepth:        DefaultDeepMaxDepth,
 		EnforceFullTime: timeBudget >= 500*time.Millisecond,
+		SolverFromPly:   DefaultDeepSolverFromPly,
 	}
 }
 
@@ -624,9 +346,9 @@ func (a *DeepSearchAgent) Name() string {
 	return "deep"
 }
 
-// SearchWithPolicy runs adaptive iterative-deepening search and returns:
+// SearchWithPolicy runs the search and returns:
 // - bestAction (0..15)
-// - rootPolicy (16-element softmax policy distribution over safe root moves from deep search Q-values)
+// - rootPolicy (16-element distribution over root moves derived from search scores / proofs)
 // - rootValue (normalized scalar value in [-1.0, +1.0])
 func (a *DeepSearchAgent) SearchWithPolicy(g *engine.Game) (uint8, [16]float32, float32, error) {
 	var policy [16]float32
@@ -640,39 +362,20 @@ func (a *DeepSearchAgent) SearchWithPolicy(g *engine.Game) (uint8, [16]float32, 
 	if budget <= 0 {
 		budget = DefaultDeepTimeBudget
 	}
-	minDepth := a.MinDepth
-	if minDepth <= 0 {
-		minDepth = DefaultDeepMinDepth
-	}
-	maxDepth := a.MaxDepth
-	if maxDepth < minDepth {
-		maxDepth = minDepth + 10
-	}
+	a.LastSolverNodes = 0
+	a.LastNodesVisited = 0
+	a.LastProvenValue = wdlUnknown
 
-	remainingPlies := int(engine.GridCells - g.MoveCount)
-	targetMinDepth := minDepth
-	if remainingPlies < targetMinDepth {
-		targetMinDepth = remainingPlies
-	}
-	if targetMinDepth < 1 {
-		targetMinDepth = 1
-	}
-
-	me := g.CurrentPlayer
-	myBB := g.White
-	oppBB := g.Black
-	if me == engine.PlayerBlack {
-		myBB = g.Black
-		oppBB = g.White
+	myBB, oppBB := g.White, g.Black
+	if g.CurrentPlayer == engine.PlayerBlack {
+		myBB, oppBB = g.Black, g.White
 	}
 	occ := myBB | oppBB
 	surface := surfaceBitmaskFast(occ)
-	myThreats := threatCellsBitboard(myBB, oppBB)
-	oppThreats := threatCellsBitboard(oppBB, myBB)
+	myThreats, oppThreats := threatCellsPairBitboard(myBB, oppBB)
 
-	// 1. Check immediate 1-ply wins
-	myImm := myThreats & surface
-	if myImm != 0 {
+	// 1. Immediate win.
+	if myImm := myThreats & surface; myImm != 0 {
 		var winCols []uint8
 		for s := myImm; s != 0; s &= s - 1 {
 			winCols = append(winCols, uint8(bits.TrailingZeros64(s))&15)
@@ -680,344 +383,403 @@ func (a *DeepSearchAgent) SearchWithPolicy(g *engine.Game) (uint8, [16]float32, 
 		for _, c := range winCols {
 			policy[c] = 1.0 / float32(len(winCols))
 		}
-		if a.EnforceFullTime {
-			// Run deep verification tree to warm stats and honor adaptive ~1.5s compute budget
-			a.runTimedDeepening(myBB, oppBB, g.MoveCount, valid, startTime, budget, targetMinDepth, maxDepth)
-		} else {
-			a.LastDepthReached = targetMinDepth
-			a.LastElapsed = time.Since(startTime)
-		}
+		a.LastDepthReached = 1
+		a.LastProvenValue = 1
+		a.finish(startTime, budget)
 		return winCols[0], policy, 1.0, nil
 	}
 
-	// 2. Check forced 1-ply opponent blocks
-	oppImm := oppThreats & surface
-	if oppImm != 0 {
-		var blkCols []uint8
-		var safeBlkCols []uint8
+	// 2. Forced block(s): the only sensible candidates are the blocking columns.
+	var candidates []uint8
+	if oppImm := oppThreats & surface; oppImm != 0 {
+		var blkCols, safeBlkCols []uint8
 		for s := oppImm; s != 0; s &= s - 1 {
 			bit := uint8(bits.TrailingZeros64(s))
-			col := bit & 15
-			blkCols = append(blkCols, col)
+			blkCols = append(blkCols, bit&15)
 			if bit >= 48 || (oppThreats&(uint64(1)<<(bit+16))) == 0 {
-				safeBlkCols = append(safeBlkCols, col)
+				safeBlkCols = append(safeBlkCols, bit&15)
 			}
 		}
-		chosenPool := safeBlkCols
-		if len(chosenPool) == 0 {
-			chosenPool = blkCols
+		candidates = safeBlkCols
+		if len(candidates) == 0 {
+			candidates = blkCols
 		}
-		for _, c := range chosenPool {
-			policy[c] = 1.0 / float32(len(chosenPool))
-		}
-		val := float32(-0.2)
-		if len(safeBlkCols) == 0 || len(blkCols) >= 2 {
-			val = -1.0
-		}
-		if a.EnforceFullTime {
-			_, _, deepVal := a.runTimedDeepening(myBB, oppBB, g.MoveCount, chosenPool, startTime, budget, targetMinDepth, maxDepth)
-			if len(safeBlkCols) > 0 && len(blkCols) == 1 {
-				val = deepVal
+		if len(blkCols) >= 2 || len(safeBlkCols) == 0 {
+			// Already lost against correct play: block one threat and hope for a mistake.
+			for _, c := range candidates {
+				policy[c] = 1.0 / float32(len(candidates))
 			}
-		} else {
-			a.LastDepthReached = targetMinDepth
-			a.LastElapsed = time.Since(startTime)
-		}
-		return chosenPool[0], policy, val, nil
-	}
-
-	// 3. Filter out 1-ply poison columns when safe alternatives exist
-	poisonMask := surface & (oppThreats >> 16)
-	candidates := make([]uint8, 0, len(valid))
-	for _, col := range baseColumnOrder {
-		colMask := uint64(0x0001_0001_0001_0001) << col
-		bitMask := surface & colMask
-		if bitMask == 0 {
-			continue
-		}
-		if (bitMask & poisonMask) == 0 {
-			candidates = append(candidates, col)
-		}
-	}
-	if len(candidates) == 0 {
-		candidates = valid
-	}
-
-	// 4. Filter out 2-ply fork-vulnerable moves if non-vulnerable moves exist
-	nonForkVuln := make([]uint8, 0, len(candidates))
-	for _, col := range candidates {
-		colMask := uint64(0x0001_0001_0001_0001) << col
-		bit := uint8(bits.TrailingZeros64(surface & colMask))
-		nextMy := myBB | (uint64(1) << bit)
-		nextOcc := occ | (uint64(1) << bit)
-		nextSurf := surfaceBitmaskFast(nextOcc)
-		nextMyThreats := threatCellsBitboard(nextMy, oppBB)
-
-		// If this move immediately creates an unstoppable fork for us (2+ surface threats or stacked fork), take it!
-		if bits.OnesCount64(nextMyThreats&nextSurf) >= 2 || (nextMyThreats&(nextMyThreats>>16)&^oppThreats) != 0 {
-			nonForkVuln = []uint8{col}
-			break
-		}
-
-		myChecks := nextMyThreats & nextSurf
-		replySurf := nextSurf
-		if myChecks != 0 {
-			replySurf = myChecks
-		}
-		oppCanFork := false
-		for rs := replySurf; rs != 0; rs &= rs - 1 {
-			rBit := uint8(bits.TrailingZeros64(rs))
-			oppAfter := oppBB | (uint64(1) << rBit)
-			if checkBitWinFast(oppAfter, rBit) {
-				oppCanFork = true
-				break
-			}
-			occAfter := nextOcc | (uint64(1) << rBit)
-			surfAfter := surfaceBitmaskFast(occAfter)
-			if (nextMyThreats & surfAfter) != 0 {
-				continue
-			}
-			oppThreatsAfter := threatCellsBitboard(oppAfter, nextMy)
-			if bits.OnesCount64(oppThreatsAfter&surfAfter) >= 2 || (oppThreatsAfter&(oppThreatsAfter>>16)&^nextMyThreats) != 0 {
-				oppCanFork = true
-				break
-			}
-		}
-		if !oppCanFork {
-			nonForkVuln = append(nonForkVuln, col)
-		}
-	}
-	if len(nonForkVuln) > 0 {
-		candidates = nonForkVuln
-	}
-
-	bestCol, rootScores, normVal := a.runTimedDeepening(myBB, oppBB, g.MoveCount, candidates, startTime, budget, targetMinDepth, maxDepth)
-
-	// Convert root scores into a sharp probability distribution over candidates
-	maxS := -1_000_000
-	for _, col := range candidates {
-		if rootScores[col] > maxS {
-			maxS = rootScores[col]
-		}
-	}
-	if maxS >= ScoreWin/2 {
-		// Concentrate probability mass on proven winning moves
-		var winCnt float32
-		for _, col := range candidates {
-			if rootScores[col] >= ScoreWin/2 {
-				policy[col] = 1.0
-				winCnt += 1.0
-			}
-		}
-		if winCnt > 0 {
-			for i := range policy {
-				policy[i] /= winCnt
-			}
+			a.LastDepthReached = 1
+			a.LastProvenValue = -1
+			a.finish(startTime, budget)
+			return candidates[0], policy, -1.0, nil
 		}
 	} else {
-		var sumExp float64
-		for _, col := range candidates {
-			diff := float64(rootScores[col]-maxS) / 35.0
-			if diff < -30.0 {
-				continue
+		// 3. Filter out poison columns (moving at z when the opponent threatens z+1).
+		poisonMask := surface & (oppThreats >> 16)
+		for _, col := range baseColumnOrder {
+			bitMask := surface & (uint64(0x0001_0001_0001_0001) << col)
+			if bitMask != 0 && bitMask&poisonMask == 0 {
+				candidates = append(candidates, col)
 			}
-			w := math.Exp(diff)
-			policy[col] = float32(w)
-			sumExp += w
 		}
-		if sumExp > 0 {
-			for _, col := range candidates {
-				policy[col] = float32(float64(policy[col]) / sumExp)
-			}
-		} else {
-			policy[bestCol] = 1.0
+		if len(candidates) == 0 {
+			candidates = valid
 		}
 	}
 
+	bestCol, scores, proven, bestScore := a.decide(myBB, oppBB, myThreats, oppThreats, g.MoveCount, candidates, startTime, budget)
+	policy = deepRootPolicy(candidates, scores, proven, bestCol)
+
+	var normVal float32
+	switch {
+	case proven[bestCol] == 1 || bestScore >= ScoreWin/2:
+		normVal = 1.0
+	case proven[bestCol] == -1 || bestScore <= ScoreLoss/2:
+		normVal = -1.0
+	case proven[bestCol] == 0:
+		normVal = 0
+	default:
+		normVal = float32(math.Tanh(float64(bestScore) / 350.0))
+	}
+	a.finish(startTime, budget)
 	return bestCol, policy, normVal, nil
 }
 
-func (a *DeepSearchAgent) runTimedDeepening(
-	myBB, oppBB uint64,
+// finish honours EnforceFullTime (constant per-move pacing) and records the elapsed time.
+func (a *DeepSearchAgent) finish(startTime time.Time, budget time.Duration) {
+	if a.EnforceFullTime {
+		if rem := time.Until(startTime.Add(budget)); rem > 0 {
+			time.Sleep(rem)
+		}
+	}
+	a.LastElapsed = time.Since(startTime)
+}
+
+// decide runs PVS and (late in the game) the exact solver over `candidates`, returning the chosen
+// column, the PVS root scores, the proven WDL value per column (wdlUnknown if unproven) and the
+// effective score of the chosen move.
+func (a *DeepSearchAgent) decide(
+	myBB, oppBB, myT, oppT uint64,
 	moveCount uint8,
 	candidates []uint8,
 	startTime time.Time,
 	budget time.Duration,
-	targetMinDepth int,
-	maxDepth int,
-) (uint8, [16]int, float32) {
-	deadline := startTime.Add(budget)
-	searcher := newDeepSearcher(deadline, true)
-	rootHash := computeZobristHash(myBB, oppBB)
-	occ := myBB | oppBB
-	surface := surfaceBitmaskFast(occ)
-
-	var rootScores [16]int
-	for i := range rootScores {
-		rootScores[i] = ScoreLoss
+) (uint8, [16]int, [16]int, int) {
+	var proven [16]int
+	for i := range proven {
+		proven[i] = wdlUnknown
 	}
-	bestCol := candidates[0]
-	bestScore := 0
-	completedDepth := 0
-
-	// Phase 1: Iterative deepening from depth 1 up to maxDepth.
-	for depth := 1; depth <= maxDepth; depth++ {
-		if depth <= targetMinDepth {
-			searcher.hasDeadline = depth >= 8
-			searcher.lmrScale = 3
-			if depth >= 8 && time.Now().After(deadline) {
-				break
-			}
-		} else if depth <= 22 {
-			searcher.hasDeadline = true
-			searcher.lmrScale = 2
-			if time.Now().After(deadline) {
-				break
-			}
-		} else {
-			searcher.hasDeadline = true
-			searcher.lmrScale = 1
-			if time.Now().After(deadline) {
-				break
-			}
+	hardDeadline := startTime.Add(budget - deepSolverMargin)
+	useSolver := a.SolverFromPly >= 0 && int(moveCount) >= a.SolverFromPly
+	pvsDeadline := hardDeadline
+	if useSolver {
+		share := deepPVSShareWithSolver
+		if moveCount >= deepLateSolverPly {
+			share = deepPVSShareLate
 		}
-
-		iterBestCol := bestCol
-		iterBestScore := -1_000_000
-		alpha := -1_000_000
-		beta := 1_000_000
-		var iterScores [16]int
-		for i := range iterScores {
-			iterScores[i] = ScoreLoss
-		}
-
-		// Order bestCol from previous iteration first
-		ordered := make([]uint8, 0, len(candidates))
-		ordered = append(ordered, bestCol)
-		for _, c := range candidates {
-			if c != bestCol {
-				ordered = append(ordered, c)
-			}
-		}
-
-		for idx, col := range ordered {
-			colMask := uint64(0x0001_0001_0001_0001) << col
-			bit := uint8(bits.TrailingZeros64(surface & colMask))
-			newMy := myBB | (uint64(1) << bit)
-			nextHash := rootHash ^ zobristPiece[0][bit] ^ zobristTurn
-
-			var val int
-			if idx == 0 {
-				val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, depth-1, -beta, -alpha, nextHash, 1, 0)
-			} else {
-				rootRed := 0
-				if depth >= 4 && idx >= 1 && searcher.lmrScale >= 3 {
-					rootRed = 1 + (depth / 3) + (idx / 3)
-					if depth-1-rootRed < 2 {
-						rootRed = depth - 3
-					}
-				} else if depth >= 5 && idx >= 2 && searcher.lmrScale == 2 {
-					rootRed = 1 + (depth / 4) + (idx / 4)
-					if depth-1-rootRed < 2 {
-						rootRed = depth - 3
-					}
-				}
-				val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, depth-1-rootRed, -alpha-1, -alpha, nextHash, 1, 0)
-				if val > alpha && !searcher.aborted {
-					remRootDepth := depth - 1
-					if searcher.lmrScale >= 3 && depth >= 6 {
-						remRootDepth = depth - 1 - (rootRed / 2)
-					}
-					val = -searcher.pvs(oppBB, newMy, moveCount+1, 1, remRootDepth, -beta, -alpha, nextHash, 1, 0)
-				}
-			}
-
-			if searcher.aborted {
-				break
-			}
-			iterScores[col] = val
-			if val > iterBestScore {
-				iterBestScore = val
-				iterBestCol = col
-			}
-			if iterBestScore > alpha {
-				alpha = iterBestScore
-			}
-		}
-
-		if searcher.aborted {
-			break
-		}
-
-		bestCol = iterBestCol
-		bestScore = iterBestScore
-		rootScores = iterScores
-		completedDepth = depth
+		pvsDeadline = startTime.Add(time.Duration(float64(budget) * share))
 	}
 
-	// Phase 2: If EnforceFullTime is enabled and the tree search finished before the ~1.5s budget,
-	// run wider verification passes over all candidate root moves until the time budget is reached.
-	if a.EnforceFullTime {
-		searcher.hasDeadline = true
-		searcher.aborted = false
-		searcher.lmrScale = 1
-		verDepth := 6
-		for time.Now().Before(deadline) {
-			for idx, col := range candidates {
-				if time.Now().After(deadline) {
-					break
-				}
-				colMask := uint64(0x0001_0001_0001_0001) << col
-				bitMask := surface & colMask
-				if bitMask == 0 {
+	white, black := myBB, oppBB
+	if moveCount&1 == 1 {
+		white, black = oppBB, myBB
+	}
+	rootHash := colorHash(white, black)
+	remaining := int(engine.GridCells) - int(moveCount)
+
+	pvs := newPVSSearcher(pvsDeadline)
+	bestCol, scores, depth, bestScore := a.iterativeDeepening(pvs, myBB, oppBB, myT, oppT, moveCount, rootHash, candidates, startTime, pvsDeadline, remaining)
+	a.LastNodesVisited = pvs.nodes
+	pvs.release()
+	a.LastDepthReached = depth
+
+	if !useSolver {
+		return bestCol, scores, proven, bestScore
+	}
+
+	// Solve root moves in PVS order with iterative widening: every unresolved move gets a doubling
+	// node budget per round (the TT is shared across rounds), so cheap proofs - typically forced
+	// wins - surface before the solver sinks its whole budget into one hard-to-prove move.
+	order := orderByScore(candidates, scores, bestCol)
+	solver := newWDLSolver(hardDeadline)
+	side := moveCount & 1
+	surf := surfaceBitmaskFast(myBB | oppBB)
+	// Pass 0 asks "does this move win?" (child lost: value <= -1 in window (-1,0)); pass 1 asks
+	// "does this move lose?" (child won: value >= 1 in window (0,1)). A move that neither wins nor
+	// loses is a proven draw.
+	var notWin, notLoss [16]bool
+	for pass := 0; pass < 2 && !solver.timedOut; pass++ {
+		unresolved := 0
+		for _, col := range order {
+			if proven[col] == wdlUnknown {
+				unresolved++
+			}
+		}
+		for limit := uint64(20_000); unresolved > 0 && !solver.timedOut && limit < 1<<40; limit *= 4 {
+			for _, col := range order {
+				if proven[col] != wdlUnknown || (pass == 0 && notWin[col]) || (pass == 1 && notLoss[col]) {
 					continue
 				}
-				bit := uint8(bits.TrailingZeros64(bitMask))
-				newMy := myBB | (uint64(1) << bit)
-				nextHash := rootHash ^ zobristPiece[0][bit] ^ zobristTurn ^ uint64(verDepth*17+idx)
-				val := -searcher.pvs(oppBB, newMy, moveCount+1, 1, verDepth-1, -1_000_000, 1_000_000, nextHash, 1, 0)
-				if searcher.aborted {
+				bit := uint8(bits.TrailingZeros64(surf & (uint64(0x0001_0001_0001_0001) << col)))
+				nm, nmt, not := playBit(myBB, oppBB, myT, oppT, bit)
+				h := rootHash ^ zobristPiece[side][bit]
+				var v int
+				var ok bool
+				if pass == 0 {
+					v, ok = solver.solveWindow(oppBB, nm, not, nmt, h, moveCount+1, -1, 0, limit)
+				} else {
+					v, ok = solver.solveWindow(oppBB, nm, not, nmt, h, moveCount+1, 0, 1, limit)
+				}
+				if solver.timedOut {
 					break
 				}
-				if verDepth >= completedDepth && val > bestScore {
-					bestScore = val
-					bestCol = col
-					rootScores[col] = val
+				if !ok {
+					continue
+				}
+				unresolved--
+				if pass == 0 {
+					if v <= -1 {
+						proven[col] = 1
+						unresolved = 0
+						pass = 2 // a proven win ends the solver phase
+						break
+					}
+					notWin[col] = true
+				} else {
+					if v >= 1 {
+						proven[col] = -1
+					} else {
+						notLoss[col] = true
+					}
+				}
+				if notWin[col] && notLoss[col] {
+					proven[col] = 0
 				}
 			}
-			if searcher.aborted || time.Now().After(deadline) {
+		}
+	}
+	a.LastSolverNodes = solver.nodes
+	solver.release()
+
+	// Choose: proven win > best of (unproven by PVS score, proven draw scored as 0) > proven loss.
+	chosen := bestCol
+	chosenKey := math.MinInt64
+	for _, col := range order {
+		var key int
+		switch proven[col] {
+		case 1:
+			key = math.MaxInt32
+		case 0:
+			key = 0
+		case -1:
+			// Proven loss: only chosen if everything loses; prefer the longest PVS resistance.
+			key = math.MinInt32 + (scores[col] - ScoreLoss*2)
+		default:
+			key = scores[col]
+			if key <= ScoreLoss/2 && proven[col] == wdlUnknown {
+				key = math.MinInt32/2 + (scores[col] - ScoreLoss*2)
+			}
+		}
+		if key > chosenKey {
+			chosenKey = key
+			chosen = col
+		}
+	}
+	a.LastProvenValue = proven[chosen]
+	if proven[chosen] != wdlUnknown {
+		a.LastDepthReached = remaining
+	}
+	chosenScore := scores[chosen]
+	switch proven[chosen] {
+	case 1:
+		chosenScore = ScoreWin / 2
+	case 0:
+		chosenScore = 0
+	case -1:
+		chosenScore = ScoreLoss / 2
+	}
+	return chosen, scores, proven, chosenScore
+}
+
+// iterativeDeepening runs root PVS for increasing depths until the deadline, a proven result, the
+// end of the game horizon, or (when EnforceFullTime is false) MinDepth is reached.
+func (a *DeepSearchAgent) iterativeDeepening(
+	s *pvsSearcher,
+	myBB, oppBB, myT, oppT uint64,
+	moveCount uint8,
+	rootHash uint64,
+	candidates []uint8,
+	startTime, deadline time.Time,
+	remaining int,
+) (uint8, [16]int, int, int) {
+	const inf = 1_000_000
+	var scores [16]int
+	for i := range scores {
+		scores[i] = ScoreLoss * 2
+	}
+	maxDepth := a.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = DefaultDeepMaxDepth
+	}
+	if maxDepth > remaining {
+		maxDepth = remaining
+	}
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
+	minDepth := a.MinDepth
+	if minDepth <= 0 {
+		minDepth = DefaultDeepMinDepth
+	}
+
+	occ := myBB | oppBB
+	surface := surfaceBitmaskFast(occ)
+	side := moveCount & 1
+	order := append([]uint8(nil), candidates...)
+	bestCol := order[0]
+	bestScore := 0
+	completed := 0
+
+	for depth := 1; depth <= maxDepth; depth++ {
+		if depth > 1 {
+			now := time.Now()
+			if now.After(deadline) {
 				break
 			}
-			verDepth++
-			if verDepth > completedDepth && verDepth <= int(engine.GridCells-moveCount) {
-				completedDepth = verDepth
-			}
-			if time.Until(deadline) < 5*time.Millisecond {
+			// Do not start an iteration that almost certainly cannot finish in time.
+			if a.EnforceFullTime && now.Sub(startTime) > deadline.Sub(startTime)*6/10 {
 				break
 			}
 		}
-		if rem := time.Until(deadline); rem > 0 {
-			time.Sleep(rem)
+		// The first iteration always completes so that a legal, searched move is available.
+		s.deadline = deadline
+		if depth == 1 {
+			s.deadline = startTime.Add(time.Hour)
+		}
+		for i := range s.history[0] {
+			s.history[0][i] /= 2
+			s.history[1][i] /= 2
+		}
+
+		iterScores := scores
+		iterBest := -inf
+		iterCol := order[0]
+		alpha := -inf
+		for i, col := range order {
+			bit := uint8(bits.TrailingZeros64(surface & (uint64(0x0001_0001_0001_0001) << col)))
+			nm, nmt, not := playBit(myBB, oppBB, myT, oppT, bit)
+			nh := rootHash ^ zobristPiece[side][bit]
+			var v int
+			if i == 0 {
+				v = -s.search(oppBB, nm, not, nmt, moveCount+1, 1, depth-1, -inf, inf, nh)
+			} else {
+				v = -s.search(oppBB, nm, not, nmt, moveCount+1, 1, depth-1, -alpha-1, -alpha, nh)
+				if v > alpha && !s.aborted {
+					v = -s.search(oppBB, nm, not, nmt, moveCount+1, 1, depth-1, -inf, -alpha, nh)
+				}
+			}
+			if s.aborted {
+				break
+			}
+			iterScores[col] = v
+			if v > iterBest {
+				iterBest = v
+				iterCol = col
+			}
+			if v > alpha {
+				alpha = v
+			}
+		}
+
+		if s.aborted {
+			// Partial iteration: completed root moves were searched deeper than before. Accept
+			// them only if the previous best move (searched first) completed.
+			if iterBest > -inf {
+				bestCol, bestScore, scores = iterCol, iterBest, iterScores
+			}
+			break
+		}
+		bestCol, bestScore, scores, completed = iterCol, iterBest, iterScores, depth
+		order = orderByScore(candidates, scores, bestCol)
+
+		if bestScore >= ScoreWin/2 || bestScore <= ScoreLoss/2 {
+			break // proven by search
+		}
+		if !a.EnforceFullTime && depth >= minDepth {
+			break
 		}
 	}
+	return bestCol, scores, completed, bestScore
+}
 
-	if completedDepth < targetMinDepth {
-		completedDepth = targetMinDepth
+// orderByScore returns candidates ordered by descending score with `first` in front (stable).
+func orderByScore(candidates []uint8, scores [16]int, first uint8) []uint8 {
+	out := make([]uint8, 0, len(candidates))
+	out = append(out, first)
+	for _, c := range candidates {
+		if c == first {
+			continue
+		}
+		pos := len(out)
+		out = append(out, c)
+		for pos > 1 && scores[out[pos-1]] < scores[c] {
+			out[pos] = out[pos-1]
+			pos--
+		}
+		out[pos] = c
 	}
-	a.LastDepthReached = completedDepth
-	a.LastNodesVisited = searcher.nodes
-	a.LastElapsed = time.Since(startTime)
+	return out
+}
 
-	var normVal float32
-	if bestScore >= ScoreWin/2 {
-		normVal = 1.0
-	} else if bestScore <= ScoreLoss/2 {
-		normVal = -1.0
-	} else {
-		normVal = float32(math.Tanh(float64(bestScore) / 350.0))
+// deepRootPolicy converts root scores and proofs into a probability distribution over candidates.
+func deepRootPolicy(candidates []uint8, scores [16]int, proven [16]int, bestCol uint8) [16]float32 {
+	var policy [16]float32
+	var wins []uint8
+	for _, c := range candidates {
+		if proven[c] == 1 || scores[c] >= ScoreWin/2 {
+			wins = append(wins, c)
+		}
 	}
-
-	return bestCol, rootScores, normVal
+	if len(wins) > 0 {
+		for _, c := range wins {
+			policy[c] = 1.0 / float32(len(wins))
+		}
+		return policy
+	}
+	eff := func(c uint8) int {
+		switch proven[c] {
+		case 0:
+			return 0
+		case -1:
+			return ScoreLoss
+		}
+		return scores[c]
+	}
+	maxS := math.MinInt32
+	for _, c := range candidates {
+		if v := eff(c); v > maxS {
+			maxS = v
+		}
+	}
+	var sum float64
+	for _, c := range candidates {
+		diff := float64(eff(c)-maxS) / 35.0
+		if diff < -30.0 {
+			continue
+		}
+		w := math.Exp(diff)
+		policy[c] = float32(w)
+		sum += w
+	}
+	if sum <= 0 {
+		policy[bestCol] = 1.0
+		return policy
+	}
+	for _, c := range candidates {
+		policy[c] = float32(float64(policy[c]) / sum)
+	}
+	return policy
 }
 
 func (a *DeepSearchAgent) SelectAction(g *engine.Game) (uint8, error) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/pbures/3d3t-ai-ml-learning/internal/engine"
 )
@@ -350,10 +351,14 @@ func TestTTT3DModelParityAndTacticalPlay(t *testing.T) {
 }
 
 func TestDeepSearchAgentAdaptiveDepthAndTiming(t *testing.T) {
-	// 1. Default ~1.5s adaptive deep search agent reaches depth >= 15 in ~1.5s
+	// 1. Default ~2.8s deep search agent: real (non-inflated) iterative-deepening depth, constant
+	// per-move pacing below the 3s arena cap.
 	deepDefault := NewDeepSearchAgent(0, 0)
-	if deepDefault.Name() != "deep" || deepDefault.MinDepth != 15 {
-		t.Fatalf("unexpected default DeepSearchAgent config: name=%s minDepth=%d", deepDefault.Name(), deepDefault.MinDepth)
+	if deepDefault.Name() != "deep" || deepDefault.MinDepth != 15 || deepDefault.TimeBudget != DefaultDeepTimeBudget {
+		t.Fatalf("unexpected default DeepSearchAgent config: name=%s minDepth=%d budget=%v", deepDefault.Name(), deepDefault.MinDepth, deepDefault.TimeBudget)
+	}
+	if DefaultDeepTimeBudget >= 3*time.Second {
+		t.Fatalf("default budget %v must stay below the 3s per-move cap", DefaultDeepTimeBudget)
 	}
 
 	g := engine.NewGame()
@@ -366,11 +371,11 @@ func TestDeepSearchAgentAdaptiveDepthAndTiming(t *testing.T) {
 	}
 	t.Logf("DeepSearchAgent default move: act=%d depth=%d nodes=%d elapsed=%v val=%.3f",
 		act, deepDefault.LastDepthReached, deepDefault.LastNodesVisited, deepDefault.LastElapsed, val)
-	if deepDefault.LastDepthReached < 15 {
-		t.Fatalf("expected DeepSearchAgent to reach depth >= 15, got %d", deepDefault.LastDepthReached)
+	if deepDefault.LastDepthReached < 4 {
+		t.Fatalf("expected DeepSearchAgent to complete at least depth 4, got %d", deepDefault.LastDepthReached)
 	}
-	if deepDefault.LastElapsed < 1200_000_000 || deepDefault.LastElapsed > 2200_000_000 {
-		t.Fatalf("expected DeepSearchAgent move computation around 1.5s, got %v", deepDefault.LastElapsed)
+	if deepDefault.LastElapsed < DefaultDeepTimeBudget-50*time.Millisecond || deepDefault.LastElapsed > 3*time.Second {
+		t.Fatalf("expected DeepSearchAgent move computation around %v (< 3s), got %v", DefaultDeepTimeBudget, deepDefault.LastElapsed)
 	}
 	var pSum float32
 	for _, p := range policy {
@@ -380,7 +385,7 @@ func TestDeepSearchAgentAdaptiveDepthAndTiming(t *testing.T) {
 		t.Fatalf("expected root policy to sum to 1.0, got %f", pSum)
 	}
 
-	// 2. Fast teacher mode (EnforceFullTime=false) also reaches depth >= 15 and solves 1-ply win/block/terminal
+	// 2. Fast teacher mode (EnforceFullTime=false) solves 1-ply win/block/terminal
 	fastDeep := NewDeepSearchAgent(100_000_000, 15)
 	fastDeep.EnforceFullTime = false
 

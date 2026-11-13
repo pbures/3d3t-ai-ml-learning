@@ -713,7 +713,6 @@ func (a *TTT3DNetAgent) SelectActionWithPolicy(g *engine.Game) (uint8, [16]float
 	}
 	rootHash := computeZobristHash(myBB, oppBB)
 	searcher := newDeepSearcher(time.Time{}, false)
-	searcher.lmrScale = 2
 	searchDepth := 9
 	if a.CustomName == "ttt3d-deep-gray1" {
 		searchDepth = 11
