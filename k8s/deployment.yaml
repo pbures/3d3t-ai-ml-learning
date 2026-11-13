@@ -19,7 +19,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: arena-server
-          image: ghcr.io/pbures/3d3t-ai-ml-learning:latest
+          image: ghcr.io/pbures/3d3t-ai-ml-learning:sha-96ab1f2
           imagePullPolicy: Always
           args:
             - "-http-addr=:8080"
