@@ -49,9 +49,9 @@ var BuiltinModels = []ModelInfoDTO{
 	},
 	{
 		ID:          "deep",
-		Name:        "Deep Adaptive PVS Baseline (15+ Ply, ~1.5s / Move)",
+		Name:        "Deep PVS + Exact Endgame Solver Baseline (~2.8s / Move)",
 		Type:        "search",
-		Description: "Adaptive iterative-deepening Principal Variation Search with Zobrist transposition table, LMR, killer/history heuristics, and check extensions (~1.5s/move, 15+ plies).",
+		Description: "Iterative-deepening Principal Variation Search (Zobrist TT, logarithmic LMR with full re-search, killer/history ordering, check extensions, zugzwang-parity evaluation) combined with an exact win/draw/loss endgame solver from ply 20 that plays proven wins and avoids proven losses (~2.8s/move).",
 	},
 	{
 		ID:          "ttt3dnet",
