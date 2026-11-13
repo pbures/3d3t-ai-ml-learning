@@ -24,6 +24,11 @@ spec:
           args:
             - "-http-addr=:8080"
             - "-grpc-endpoint=unix:///tmp/3t3d_train.sock"
+          env:
+            # Soft heap limit for the Go GC, kept below the container memory limit so the runtime
+            # collects aggressively before the kernel OOM-kills the pod.
+            - name: GOMEMLIMIT
+              value: "800MiB"
           ports:
             - name: http
               containerPort: 8080
@@ -46,4 +51,4 @@ spec:
               memory: 128Mi
             limits:
               cpu: 1000m
-              memory: 512Mi
+              memory: 1Gi

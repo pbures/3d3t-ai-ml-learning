@@ -488,6 +488,18 @@ func (a *DeepSearchAgent) decide(
 	rootHash := colorHash(white, black)
 	remaining := int(engine.GridCells) - int(moveCount)
 
+	// Bound the number of searches holding transposition tables at once (memory safety). Waiting
+	// consumes this move's own budget; the absolute deadlines above still apply, so a late start
+	// just means a shallower search. If no slot frees up in time, fall back to the first candidate
+	// (already filtered for forced blocks and poison columns) without searching.
+	releaseSlot, ok := acquireDeepSearchSlot(hardDeadline)
+	if !ok {
+		var scores [16]int
+		a.LastDepthReached = 0
+		return candidates[0], scores, proven, 0
+	}
+	defer releaseSlot()
+
 	pvs := newPVSSearcher(pvsDeadline)
 	bestCol, scores, depth, bestScore := a.iterativeDeepening(pvs, myBB, oppBB, myT, oppT, moveCount, rootHash, candidates, startTime, pvsDeadline, remaining)
 	a.LastNodesVisited = pvs.nodes
