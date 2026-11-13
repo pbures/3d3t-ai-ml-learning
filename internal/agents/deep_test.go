@@ -17,8 +17,8 @@ var deepRegressionPositions = []struct {
 	moves   []uint8
 	correct []uint8 // moves that preserve the proven game value
 	value   int     // proven value for the side to move
-	// heavy positions need more solver throughput than a race-instrumented build provides within
-	// the per-move budget; their exact value is still verified by the untimed solver test.
+	// heavy positions need more solver throughput than a race-instrumented build provides; they
+	// are verified by the regular (non -race) test run.
 	heavy bool
 }{
 	{"s6deep-b2-ply30-win", []uint8{6, 2, 7, 15, 6, 6, 12, 0, 5, 4, 5, 3, 1, 5, 1, 4, 9, 13, 9, 13, 9, 9, 4, 12, 8, 8, 0, 10, 8, 15}, []uint8{0, 1, 3, 4, 5, 7, 8, 11, 12, 13, 15}, 1, false},
@@ -151,6 +151,10 @@ func TestWDLSolverLimitsAndTimeout(t *testing.T) {
 
 func TestWDLSolverProvesRegressionPositions(t *testing.T) {
 	for _, tc := range deepRegressionPositions {
+		if tc.heavy && raceEnabled {
+			t.Logf("%s: skipped under -race (tens of millions of instrumented nodes)", tc.name)
+			continue
+		}
 		g := gameFromMoves(t, tc.moves)
 		my, opp := sideBoards(g)
 		mt, ot := threatCellsPairBitboard(my, opp)
@@ -166,7 +170,7 @@ func TestWDLSolverProvesRegressionPositions(t *testing.T) {
 func TestDeepAgentFixesArenaBlunders(t *testing.T) {
 	for _, tc := range deepRegressionPositions {
 		if tc.heavy && raceEnabled {
-			t.Logf("%s: skipped under -race (verified by TestWDLSolverProvesRegressionPositions)", tc.name)
+			t.Logf("%s: skipped under -race (verified by the non-race test run)", tc.name)
 			continue
 		}
 		g := gameFromMoves(t, tc.moves)
